@@ -1,0 +1,47 @@
+# IDE & Editor folders
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# .NET Build & Publish outputs
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+[Oo]ut/
+[Dd]ist/
+[Tt]est[Rr]esults/
+*.nupkg
+*.snupkg
+
+# Python test caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+ENV/
+
+# Local FFmpeg binaries & rendered media outputs
+ffmpeg/
+tools/
+LangKinhHuKhong.Output/
+*.mp4
+*.m4a
+*.flac
+*.wav
+
+# OS & Temp files
+[Tt]mp/
+[Tt]emp/
+*.tmp
+*.bak
+*.log
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
