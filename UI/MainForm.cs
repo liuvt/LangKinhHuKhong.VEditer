@@ -38,13 +38,18 @@ public sealed class MainForm : Form
     private readonly TextBox _genSrtScriptBox = NewTextBox();
     private readonly Label _genSrtFlowHint = NewLabel("Chọn 1 tệp MP3 hoặc Video (.mp4/.mkv/...) để tạo phụ đề .SRT khớp thời gian thực.", 9, Muted);
     private readonly StudioButton _genSrtRunBtn = NewButton("⚡  TẠO FILE .SRT NGAY", true);
-    private readonly StudioButton _genSrtPushToRenderBtn = NewButton("➕  ĐƯA VÀO MỤC 03", false);
-    private readonly StudioButton _genSrtOpenFileBtn = NewButton("MỞ FILE SRT", false);
+    private readonly StudioButton _genSrtSaveEditsBtn = NewButton("💾  LƯU NỘI DUNG .SRT", false);
+    private readonly StudioButton _genSrtPushToRenderBtn = NewButton("➕  ĐƯA SANG RENDER VIDEO", false);
+    private readonly StudioButton _genSrtOpenFileBtn = NewButton("📂  MỞ VỊ TRÍ FILE", false);
     private string? _lastGeneratedSrtPath;
     private string? _lastExtractedMp3Path;
 
+    private StudioButton? _navRenderBtn;
+    private StudioButton? _navCreateSrtBtn;
+    private Label? _sidebarHint;
+    private Panel? _workspaceHost;
+    private Panel? _createSrtScreen;
     private Panel? _srtCard;
-    private Panel? _srtGenCard;
     private Panel? _videoCard;
     private Panel? _mp3Card;
     private Panel? _overlayCard;
@@ -252,33 +257,27 @@ public sealed class MainForm : Form
             WrapContents = false,
             BackColor = SurfaceDark
         };
-        var navTitle = NewLabel("ĐIỀU HƯỚNG STUDIO", 9, Muted, true);
+        var navTitle = NewLabel("CHẾ ĐỘ LÀM VIỆC", 9, Muted, true);
         navTitle.AutoSize = false; navTitle.Width = 192; navTitle.Height = 34;
         menu.Controls.Add(navTitle);
-        AddNav(menu, "01    Video nguồn", () => JumpTo(_videoCard));
-        AddNav(menu, "02    Audio MP3", () => JumpTo(_mp3Card));
-        AddNav(menu, "03    Phụ đề SRT", () => JumpTo(_srtCard));
-        AddNav(menu, "04    Ảnh PNG 4 góc", () => JumpTo(_overlayCard));
-        AddNav(menu, "05    Xem trước 16:9", () => JumpTo(_previewCard));
-        AddNav(menu, "06    Thiết lập xuất", () => JumpTo(_settingsCard));
-        AddNav(menu, "07    Tạo .SRT (MP3/Video)", () => JumpTo(_srtGenCard), highlight: true);
+        _navRenderBtn = AddNav(menu, "🎬   Render Video", () => SwitchScreen(isRenderScreen: true), active: true);
+        _navCreateSrtBtn = AddNav(menu, "📝   Create .SRT", () => SwitchScreen(isRenderScreen: false), active: false);
 
-        var hint = NewLabel(
-            "MẸO TỐI ƯU TỐC ĐỘ:\n\n" +
-            "• Chuẩn hóa MP3 & Video chạy song song đa nhân CPU + bộ đệm RAM.\n" +
-            "• Mục 07 cho phép chọn 1 MP3 hoặc 1 Video để tách/xuất ngay 1 file .SRT khớp thời gian thực.",
-            8.75f, Muted);
-        hint.Width = 194; hint.Height = 165; hint.Margin = new Padding(2, 18, 0, 0);
-        menu.Controls.Add(hint);
+        _sidebarHint = NewLabel("", 8.75f, Muted);
+        _sidebarHint.Width = 194; _sidebarHint.Height = 260; _sidebarHint.Margin = new Padding(2, 18, 0, 0);
+        menu.Controls.Add(_sidebarHint);
         sidebar.Controls.Add(menu);
         central.Controls.Add(sidebar, 0, 0);
 
+        _workspaceHost = new Panel { Dock = DockStyle.Fill, BackColor = Background, Margin = Padding.Empty, Padding = Padding.Empty };
+        central.Controls.Add(_workspaceHost, 1, 0);
+
+        // MÀN HÌNH 1: RENDER VIDEO
         _scrollArea = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Background };
-        central.Controls.Add(_scrollArea, 1, 0);
         var body = new TableLayoutPanel
         {
             Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2, RowCount = 8, Padding = new Padding(18, 14, 18, 18), BackColor = Background
+            ColumnCount = 2, RowCount = 7, Padding = new Padding(18, 14, 18, 18), BackColor = Background
         };
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -288,7 +287,6 @@ public sealed class MainForm : Form
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 296));
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 255));
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
-        body.RowStyles.Add(new RowStyle(SizeType.Absolute, 330));
         body.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         _scrollArea.Controls.Add(body);
 
@@ -315,14 +313,17 @@ public sealed class MainForm : Form
         body.Controls.Add(_settingsCard, 0, 5);
         body.SetColumnSpan(_settingsCard, 2);
 
-        _srtGenCard = CreateStandaloneSrtGeneratorCard();
-        body.Controls.Add(_srtGenCard, 0, 6);
-        body.SetColumnSpan(_srtGenCard, 2);
-
-        var note = NewLabel("0–4 PNG cố định theo 4 góc • Phụ đề luôn nằm lớp trên cùng • Tối ưu đa nhân CPU & RAM • Công cụ Tạo SRT độc lập ở Mục 07", 9.5f, Muted);
+        var note = NewLabel("0–4 PNG cố định theo 4 góc • Phụ đề luôn nằm lớp trên cùng • Tối ưu đa nhân CPU & RAM • Xuất 1 MP4 duy nhất", 9.5f, Muted);
         note.Margin = new Padding(10, 4, 0, 0);
-        body.Controls.Add(note, 0, 7);
+        body.Controls.Add(note, 0, 6);
         body.SetColumnSpan(note, 2);
+
+        // MÀN HÌNH 2: CREATE .SRT (Độc lập hoàn toàn)
+        _createSrtScreen = CreateStandaloneSrtScreen();
+        _createSrtScreen.Visible = false;
+
+        _workspaceHost.Controls.Add(_scrollArea);
+        _workspaceHost.Controls.Add(_createSrtScreen);
         root.Controls.Add(central, 0, 1);
 
         var footer = new TableLayoutPanel
@@ -352,108 +353,147 @@ public sealed class MainForm : Form
         _ffmpegStatus.Padding = new Padding(0, 12, 14, 0);
         footer.Controls.Add(buttons, 0, 2);
         root.Controls.Add(footer, 0, 2);
+
+        SwitchScreen(isRenderScreen: true);
     }
 
-    private static void AddNav(FlowLayoutPanel menu, string title, Action click, bool highlight = false)
+    private static StudioButton AddNav(FlowLayoutPanel menu, string title, Action click, bool active = false)
     {
-        var item = NewButton(title, highlight);
+        var item = NewButton(title, active);
         item.Width = 196;
-        item.Height = 40;
-        item.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
-        item.Margin = new Padding(0, 0, 0, 6);
-        item.Padding = new Padding(12, 0, 8, 0);
+        item.Height = 46;
+        item.Font = new Font("Segoe UI", 10F, FontStyle.Bold);
+        item.Margin = new Padding(0, 0, 0, 10);
+        item.Padding = new Padding(14, 0, 10, 0);
         item.TextAlign = ContentAlignment.MiddleLeft;
-        if (!highlight)
-        {
-            item.BackColor = Color.FromArgb(24, 33, 47);
-            item.BorderColor = Color.FromArgb(40, 53, 73);
-        }
+        ApplyNavTabStyle(item, active);
         item.Click += (_, _) => click();
         menu.Controls.Add(item);
+        return item;
     }
 
-    private void JumpTo(Control? card)
+    private static void ApplyNavTabStyle(StudioButton btn, bool active)
     {
-        if (card is null || _scrollArea is null) return;
-        _scrollArea.ScrollControlIntoView(card);
+        btn.IsPrimary = active;
+        btn.BackColor = active ? Accent : Color.FromArgb(24, 33, 47);
+        btn.BorderColor = active ? Color.FromArgb(96, 165, 250) : Color.FromArgb(40, 53, 73);
+        btn.HoverBackColor = active ? Color.FromArgb(59, 130, 246) : Color.FromArgb(35, 48, 68);
+        btn.PressedBackColor = active ? Color.FromArgb(29, 78, 216) : Color.FromArgb(20, 28, 40);
+        btn.ForeColor = active ? Color.White : Color.FromArgb(203, 213, 225);
+        btn.Invalidate();
+    }
+
+    private void SwitchScreen(bool isRenderScreen)
+    {
+        if (_scrollArea is not null) _scrollArea.Visible = isRenderScreen;
+        if (_createSrtScreen is not null) _createSrtScreen.Visible = !isRenderScreen;
+        if (_navRenderBtn is not null) ApplyNavTabStyle(_navRenderBtn, isRenderScreen);
+        if (_navCreateSrtBtn is not null) ApplyNavTabStyle(_navCreateSrtBtn, !isRenderScreen);
+
+        _render.Visible = isRenderScreen;
+        _openFolder.Visible = isRenderScreen;
+
+        if (_sidebarHint is not null)
+        {
+            _sidebarHint.Text = isRenderScreen
+                ? "MÀN HÌNH RENDER VIDEO:\n\n" +
+                  "• Ghép nhiều Video & nhiều MP3 thành 1 file MP4 duy nhất.\n\n" +
+                  "• Chuẩn hóa đa luồng CPU/GPU & bộ đệm RAM tốc độ cao.\n\n" +
+                  "• Kéo thả tệp trực tiếp vào danh sách hoặc khung Preview 16:9."
+                : "MÀN HÌNH CREATE .SRT:\n\n" +
+                  "• Luồng 1: Chọn 1 file MP3 ➔ Xuất 1 file .SRT khớp thời gian thực.\n\n" +
+                  "• Luồng 2: Chọn 1 file Video ➔ Tự tách MP3 ➔ Xuất 1 file .SRT khớp thời gian thực.\n\n" +
+                  "• Có thể sửa trực tiếp phụ đề và đẩy sang màn hình Render Video.";
+        }
     }
 
     /// <summary>
-    /// Tính năng Ngoài luồng (Mục 07):
+    /// Màn hình số 2 (Create .SRT) độc lập hoàn toàn với màn hình Render Video:
     /// - Chọn 1 file MP3 => xuất 1 file .SRT khớp thời gian thực.
     /// - Chọn 1 file Video => tự động tách ra MP3 (Video -> MP3 -> .SRT) rồi xuất 1 file .SRT khớp thời gian thực.
     /// </summary>
-    private Panel CreateStandaloneSrtGeneratorCard()
+    private Panel CreateStandaloneSrtScreen()
     {
-        var card = NewCard();
-        card.BorderColor = Color.FromArgb(45, 85, 155);
-        var table = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
-        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        var screen = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Background,
+            Padding = new Padding(18, 14, 18, 18)
+        };
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Background,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 265));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        // Card trên: Chọn file MP3 / Video, Cấu hình & Nút thực thi
+        var topCard = NewCard();
+        topCard.BorderColor = Color.FromArgb(45, 85, 155);
+        var topTable = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 5, ColumnCount = 1 };
+        topTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        topTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        topTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        topTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        topTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var headerRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
-        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
-        headerRow.Controls.Add(NewLabel("07  CÔNG CỤ TẠO .SRT NGOÀI LUỒNG (1 MP3 HOẶC 1 VIDEO ➔ 1 FILE .SRT)", 11, Color.FromArgb(96, 165, 250), true), 0, 0);
+        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+        headerRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        headerRow.Controls.Add(NewLabel("01  CHỌN TỆP MP3 HOẶC VIDEO ĐỂ TẠO PHỤ ĐỀ .SRT KHỚP THỜI GIAN THỰC", 11.5f, Color.FromArgb(96, 165, 250), true), 0, 0);
         _genSrtFlowHint.TextAlign = ContentAlignment.MiddleRight;
         headerRow.Controls.Add(_genSrtFlowHint, 1, 0);
-        table.Controls.Add(headerRow, 0, 0);
-
-        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54));
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
-
-        // Cột trái: Chọn tệp MP3 / Video, Đường dẫn lưu SRT, Chế độ & Ngôn ngữ
-        var left = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(0, 4, 12, 0) };
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        left.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        topTable.Controls.Add(headerRow, 0, 0);
 
         var inputRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
+        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
         inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
-        inputRow.Controls.Add(NewLabel("Tệp MP3 / Video:", 9.5f, Muted), 0, 0);
+        inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
+        inputRow.Controls.Add(NewLabel("Tệp nguồn (MP3/Video):", 10f, Muted), 0, 0);
         _genSrtInputPath.Dock = DockStyle.Fill;
         _genSrtInputPath.ReadOnly = true;
-        _genSrtInputPath.PlaceholderText = "Kéo thả hoặc chọn 1 file .mp3, .wav, .mp4, .mkv...";
+        _genSrtInputPath.PlaceholderText = "Kéo thả hoặc bấm nút bên phải để chọn 1 file .mp3, .wav, .mp4, .mkv, .mov...";
         inputRow.Controls.Add(_genSrtInputPath, 1, 0);
         var pickInputBtn = NewButton("CHỌN MP3 / VIDEO", true);
         pickInputBtn.Dock = DockStyle.Fill;
-        pickInputBtn.Margin = new Padding(8, 0, 0, 4);
+        pickInputBtn.Margin = new Padding(10, 0, 0, 5);
         pickInputBtn.Click += (_, _) => ChooseStandaloneSrtInput();
         inputRow.Controls.Add(pickInputBtn, 2, 0);
-        left.Controls.Add(inputRow, 0, 0);
+        topTable.Controls.Add(inputRow, 0, 1);
 
         var outputRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty };
-        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
+        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
         outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
-        outputRow.Controls.Add(NewLabel("Lưu tệp .SRT tại:", 9.5f, Muted), 0, 0);
+        outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
+        outputRow.Controls.Add(NewLabel("Đường dẫn xuất .SRT:", 10f, Muted), 0, 0);
         _genSrtOutputPath.Dock = DockStyle.Fill;
-        _genSrtOutputPath.PlaceholderText = "Tự động đặt cùng thư mục với tệp gốc (.srt)";
+        _genSrtOutputPath.PlaceholderText = "Tự động đặt cùng tên và cùng thư mục với tệp MP3/Video gốc (.srt)";
         outputRow.Controls.Add(_genSrtOutputPath, 1, 0);
-        var pickOutBtn = NewButton("ĐỔI NƠI LƯU...", false);
+        var pickOutBtn = NewButton("ĐỔI NƠI LƯU .SRT...", false);
         pickOutBtn.Dock = DockStyle.Fill;
-        pickOutBtn.Margin = new Padding(8, 0, 0, 4);
+        pickOutBtn.Margin = new Padding(10, 0, 0, 5);
         pickOutBtn.Click += (_, _) => ChooseStandaloneSrtOutput();
         outputRow.Controls.Add(pickOutBtn, 2, 0);
-        left.Controls.Add(outputRow, 0, 1);
+        topTable.Controls.Add(outputRow, 0, 2);
 
         var modeRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(0, 6, 0, 0) };
-        modeRow.Controls.Add(NewInlineLabel("Chế độ:", leftMargin: 0));
+        modeRow.Controls.Add(NewInlineLabel("Phương thức tạo:", leftMargin: 0));
         _genSrtMode.Items.AddRange([
             "Nhận diện giọng nói AI (Speech-to-Text)",
             "Khớp kịch bản văn bản vào sóng âm thực",
             "Tách khung thời gian theo nhịp nói"
         ]);
         _genSrtMode.SelectedIndex = 0;
-        _genSrtMode.Width = 248;
+        _genSrtMode.Width = 265;
         modeRow.Controls.Add(_genSrtMode);
 
-        modeRow.Controls.Add(NewInlineLabel("Ngôn ngữ:"));
+        modeRow.Controls.Add(NewInlineLabel("Ngôn ngữ giọng đọc:", leftMargin: 16));
         _genSrtLang.Items.AddRange([
             "vi-VN (Tiếng Việt)",
             "en-US (Tiếng Anh)",
@@ -462,60 +502,74 @@ public sealed class MainForm : Form
             "ko-KR (Tiếng Hàn)"
         ]);
         _genSrtLang.SelectedIndex = 0;
-        _genSrtLang.Width = 148;
+        _genSrtLang.Width = 158;
         modeRow.Controls.Add(_genSrtLang);
-        left.Controls.Add(modeRow, 0, 2);
 
-        var extraRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, Padding = new Padding(0, 6, 0, 0) };
         _genKeepVideoMp3.Checked = true;
         _genKeepVideoMp3.AutoSize = true;
         _genKeepVideoMp3.ForeColor = Foreground;
-        _genKeepVideoMp3.Text = "Khi chọn Video: Lưu kèm cả file .MP3 đã tách (Video ➔ MP3 ➔ .SRT)";
-        _genKeepVideoMp3.Margin = new Padding(0, 4, 12, 0);
-        extraRow.Controls.Add(_genKeepVideoMp3);
-        left.Controls.Add(extraRow, 0, 3);
+        _genKeepVideoMp3.Text = "Lưu kèm file .MP3 khi tách từ Video (Video ➔ MP3 ➔ .SRT)";
+        _genKeepVideoMp3.Margin = new Padding(18, 6, 0, 0);
+        modeRow.Controls.Add(_genKeepVideoMp3);
+        topTable.Controls.Add(modeRow, 0, 3);
 
-        body.Controls.Add(left, 0, 0);
-
-        // Cột phải: Ô nhập kịch bản đối chiếu (tùy chọn) hoặc hiển thị kết quả SRT vừa tạo
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        right.Controls.Add(NewLabel("Văn bản kịch bản đối chiếu (tùy chọn) / Xem trước nội dung .SRT xuất ra:", 9, Muted), 0, 0);
-        _genSrtScriptBox.Dock = DockStyle.Fill;
-        _genSrtScriptBox.Multiline = true;
-        _genSrtScriptBox.ScrollBars = ScrollBars.Vertical;
-        _genSrtScriptBox.PlaceholderText = "Để trống nếu muốn tự động nhận diện giọng nói từ MP3/Video, hoặc dán lời thoại vào đây để căn khớp chính xác vào sóng âm thực tế...";
-        right.Controls.Add(_genSrtScriptBox, 0, 1);
-        body.Controls.Add(right, 1, 0);
-
-        table.Controls.Add(body, 0, 1);
-
-        // Hàng nút điều khiển dưới cùng của Card 07
         var actionRow = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 0, 0), WrapContents = false };
-        _genSrtRunBtn.Width = 210;
-        _genSrtRunBtn.Height = 38;
-        _genSrtPushToRenderBtn.Width = 175;
-        _genSrtPushToRenderBtn.Height = 38;
+        _genSrtRunBtn.Width = 220;
+        _genSrtRunBtn.Height = 40;
+        _genSrtSaveEditsBtn.Width = 185;
+        _genSrtSaveEditsBtn.Height = 40;
+        _genSrtSaveEditsBtn.Enabled = false;
+        _genSrtPushToRenderBtn.Width = 215;
+        _genSrtPushToRenderBtn.Height = 40;
         _genSrtPushToRenderBtn.Enabled = false;
-        _genSrtOpenFileBtn.Width = 138;
-        _genSrtOpenFileBtn.Height = 38;
+        _genSrtOpenFileBtn.Width = 165;
+        _genSrtOpenFileBtn.Height = 40;
         _genSrtOpenFileBtn.Enabled = false;
 
         _genSrtRunBtn.Click += async (_, _) => await RunStandaloneSrtGenerationAsync();
+        _genSrtSaveEditsBtn.Click += async (_, _) => await SaveEditedSrtContentAsync();
         _genSrtPushToRenderBtn.Click += (_, _) => PushGeneratedSrtToRenderList();
         _genSrtOpenFileBtn.Click += (_, _) => OpenGeneratedSrtFile();
 
-        actionRow.Controls.AddRange([_genSrtRunBtn, _genSrtPushToRenderBtn, _genSrtOpenFileBtn]);
-        table.Controls.Add(actionRow, 0, 2);
+        actionRow.Controls.AddRange([_genSrtRunBtn, _genSrtSaveEditsBtn, _genSrtPushToRenderBtn, _genSrtOpenFileBtn]);
+        topTable.Controls.Add(actionRow, 0, 4);
+        topCard.Controls.Add(topTable);
+        layout.Controls.Add(topCard, 0, 0);
 
-        EnableStandaloneSrtDrop(card);
-        card.Controls.Add(table);
+        // Card dưới: Trình biên tập kịch bản & kết quả .SRT toàn màn hình
+        var bottomCard = NewCard();
+        var bottomTable = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
+        bottomTable.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        bottomTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var editorHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        editorHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
+        editorHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+        editorHeader.Controls.Add(NewLabel("02  NỘI DUNG PHỤ ĐỀ .SRT / KỊCH BẢN ĐỐI CHIẾU", 11f, Foreground, true), 0, 0);
+        var editorSubHint = NewLabel("Có thể dán kịch bản trước khi tạo hoặc chỉnh sửa trực tiếp các mốc thời gian .SRT sau khi xuất", 9f, Muted);
+        editorSubHint.TextAlign = ContentAlignment.MiddleRight;
+        editorHeader.Controls.Add(editorSubHint, 1, 0);
+        bottomTable.Controls.Add(editorHeader, 0, 0);
+
+        _genSrtScriptBox.Dock = DockStyle.Fill;
+        _genSrtScriptBox.Multiline = true;
+        _genSrtScriptBox.ScrollBars = ScrollBars.Vertical;
+        _genSrtScriptBox.Font = new Font("Consolas", 10.5F, FontStyle.Regular);
+        _genSrtScriptBox.PlaceholderText =
+            "• Để trống ô này nếu muốn AI tự động nhận diện giọng nói từ file MP3 / Video sang .SRT.\r\n" +
+            "• Hoặc dán nội dung văn bản / kịch bản vào đây và chọn chế độ 'Khớp kịch bản văn bản vào sóng âm thực' để hệ thống tự căn thời gian Start --> End khớp chính xác theo giọng đọc.\r\n" +
+            "• Sau khi tạo xong, toàn bộ nội dung file .SRT sẽ hiển thị tại đây để bạn kiểm tra và chỉnh sửa.";
+        bottomTable.Controls.Add(_genSrtScriptBox, 0, 1);
+        bottomCard.Controls.Add(bottomTable);
+        layout.Controls.Add(bottomCard, 0, 1);
+
+        screen.Controls.Add(layout);
+        EnableStandaloneSrtDrop(screen);
         _editableControls.AddRange([
             pickInputBtn, pickOutBtn, _genSrtOutputPath, _genSrtMode, _genSrtLang,
-            _genKeepVideoMp3, _genSrtScriptBox, _genSrtRunBtn, _genSrtPushToRenderBtn, _genSrtOpenFileBtn
+            _genKeepVideoMp3, _genSrtScriptBox, _genSrtRunBtn, _genSrtSaveEditsBtn, _genSrtPushToRenderBtn, _genSrtOpenFileBtn
         ]);
-        return card;
+        return screen;
     }
 
     private void EnableStandaloneSrtDrop(Control root)
@@ -646,6 +700,7 @@ public sealed class MainForm : Form
             if (!IsDisposed)
             {
                 _genSrtScriptBox.Text = await File.ReadAllTextAsync(result.SrtFilePath);
+                _genSrtSaveEditsBtn.Enabled = true;
                 _genSrtPushToRenderBtn.Enabled = true;
                 _genSrtOpenFileBtn.Enabled = true;
 
@@ -657,7 +712,7 @@ public sealed class MainForm : Form
                 MessageBox.Show(this,
                     $"Đã xuất thành công 1 file .SRT khớp thời gian thực ({result.Cues.Count} phân đoạn):\n\n" +
                     $"• File SRT:\n{result.SrtFilePath}{mp3Note}\n\n" +
-                    "Bạn có thể bấm '➕ ĐƯA VÀO MỤC 03' để sử dụng ngay cho việc xuất video.",
+                    "Bạn có thể sửa trực tiếp trên màn hình hoặc bấm '➕ ĐƯA SANG RENDER VIDEO' để chuyển qua màn hình dựng video.",
                     "Tạo phụ đề .SRT hoàn tất",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -677,13 +732,33 @@ public sealed class MainForm : Form
             _cts?.Dispose();
             _cts = null;
             SetBusy(false);
-            _genSrtPushToRenderBtn.Enabled = !string.IsNullOrWhiteSpace(_lastGeneratedSrtPath) && File.Exists(_lastGeneratedSrtPath);
-            _genSrtOpenFileBtn.Enabled = _genSrtPushToRenderBtn.Enabled;
+            var hasFile = !string.IsNullOrWhiteSpace(_lastGeneratedSrtPath) && File.Exists(_lastGeneratedSrtPath);
+            _genSrtSaveEditsBtn.Enabled = hasFile;
+            _genSrtPushToRenderBtn.Enabled = hasFile;
+            _genSrtOpenFileBtn.Enabled = hasFile;
             if (_closeAfterCancel && !IsDisposed)
             {
                 _closeAfterCancel = false;
                 Close();
             }
+        }
+    }
+
+    private async Task SaveEditedSrtContentAsync()
+    {
+        var target = !string.IsNullOrWhiteSpace(_genSrtOutputPath.Text)
+            ? _genSrtOutputPath.Text.Trim()
+            : _lastGeneratedSrtPath;
+        if (string.IsNullOrWhiteSpace(target)) return;
+        try
+        {
+            await File.WriteAllTextAsync(target, _genSrtScriptBox.Text, new System.Text.UTF8Encoding(false));
+            _lastGeneratedSrtPath = target;
+            _status.Text = $"Đã lưu nội dung .SRT vào: {Path.GetFileName(target)}";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Không thể lưu .SRT", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -695,8 +770,10 @@ public sealed class MainForm : Form
             AddFiles([_lastExtractedMp3Path], isVideo: false);
         else if (!SrtGenerator.IsVideoFile(_genSrtInputPath.Text) && File.Exists(_genSrtInputPath.Text) && _mp3s.Items.Count == 0)
             AddFiles([_genSrtInputPath.Text], isVideo: false);
-        _status.Text = $"Đã nạp {Path.GetFileName(_lastGeneratedSrtPath)} vào Mục 03 (Phụ đề SRT).";
-        JumpTo(_srtCard);
+        if (SrtGenerator.IsVideoFile(_genSrtInputPath.Text) && File.Exists(_genSrtInputPath.Text) && _videos.Items.Count == 0)
+            AddFiles([_genSrtInputPath.Text], isVideo: true);
+        SwitchScreen(isRenderScreen: true);
+        _status.Text = $"Đã nạp {Path.GetFileName(_lastGeneratedSrtPath)} sang màn hình Render Video.";
     }
 
     private void OpenGeneratedSrtFile()
@@ -766,7 +843,7 @@ public sealed class MainForm : Form
         _srtPreview.Multiline = true;
         _srtPreview.ReadOnly = true;
         _srtPreview.ScrollBars = ScrollBars.Vertical;
-        _srtPreview.Text = "Chưa có SRT. Bạn có thể xuất video không phụ đề hoặc tạo mới ở Mục 07.";
+        _srtPreview.Text = "Chưa có SRT. Bạn có thể xuất video không phụ đề hoặc tạo mới ở tab Create .SRT.";
         right.Controls.Add(_srtPreview, 0, 2);
         inner.Controls.Add(right, 1, 0);
         table.Controls.Add(inner, 0, 1);
@@ -853,7 +930,7 @@ public sealed class MainForm : Form
         _srtCount.Text = $"{_srts.Items.Count} file SRT";
         if (_srts.Items.Count == 0)
         {
-            _srtPreview.Text = "Chưa có SRT. Có thể xuất video không phụ đề hoặc tạo tự động ở Mục 07.";
+            _srtPreview.Text = "Chưa có SRT. Có thể xuất video không phụ đề hoặc tạo tự động ở tab Create .SRT.";
             RefreshLayoutPreview();
             return;
         }
