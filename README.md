@@ -1,25 +1,29 @@
-# LangKinhHuKhong.Editer v4.1 — UI Refresh
+# LangKinhHuKhong.Editer v4.2 Pro — Multi-Core Video & AI Subtitle Studio
 
-**Windows 10/11 x64 · C# .NET 8 · FFmpeg + ffprobe**
+**Windows 10/11 x64 · C# .NET 8 · FFmpeg + FFprobe**
 
-Bản **v4.1** tập trung vào việc **giảm độ sáng**, **thiết kế lại bố cục hiển thị**, **tối ưu text giao diện** và **sửa logo ở header**.
+Bản **v4.2 Pro** nâng cấp toàn diện **Giao diện Pro Studio Dark Slate**, **Tối ưu tốc độ Đa nhân CPU / GPU & RAM**, và bổ sung **Màn hình độc lập Create .SRT (MP3 / Video ➔ .SRT khớp thời gian thực)**.
 
-## Thay đổi chính
+## Hai màn hình làm việc độc lập
 
-- Tông màu giảm sáng: nền kem trầm, trắng ngà, đỏ đậm và vàng ấm
-- Header được bố trí lại để logo hiển thị rõ hơn, không bị nhỏ/cắt
-- Cập nhật text giao diện theo hướng ngắn gọn, dễ hiểu và chuyên nghiệp hơn
-- Sidebar và khu vực nội dung được cân lại khoảng cách, nhìn gọn và dễ thao tác hơn
-- Toàn bộ **luồng hoạt động được giữ nguyên**, không thay đổi logic xử lý
+### 1. Màn hình `🎬 Render Video`
+- Ghép nhiều video nguồn thành 1 danh sách phát (chỉnh tốc độ riêng cho từng video: `0.4×`, `0.5×`, `0.75×`, `1×`, `1.5×`, `2×`)
+- Ghép toàn bộ MP3 thành 1 luồng âm thanh liên tục (xử lý song song đa luồng CPU)
+- Tự động lặp danh sách video theo đúng tổng thời lượng audio MP3
+- Chèn 0–4 ảnh PNG/JPG/WebP ở 4 góc với kích thước & tọa độ độc lập (chỉ giải mã và scale Lanczos 1 lần cho mỗi ảnh tĩnh)
+- Xem trước bố cục `16:9` thời gian thực (cache trực tiếp trên RAM, không đọc đĩa lặp lại)
+- Chèn cứng (Burn-in) hoặc xuất kèm tệp phụ đề `.SRT` chuẩn UTF-8
+- Hỗ trợ mã hóa **H.264 Đa luồng CPU** và **NVIDIA NVENC GPU** (tự động kiểm tra và fallback về CPU an toàn nếu máy không có GPU NVIDIA)
+- Xuất ra **1 tệp MP4 duy nhất** (`720p`, `1080p`, `4K`)
 
-## Không thay đổi
-
-- Ghép nhiều video thành 1 video cuối
-- Ghép toàn bộ MP3 thành 1 audio
-- Chèn 4 ảnh PNG ở 4 góc
-- Preview bố cục
-- Burn / export SRT
-- Xuất 1 file MP4 duy nhất
+### 2. Màn hình `📝 Create .SRT` (Ngoài luồng)
+- **Luồng 1 (MP3/Audio ➔ .SRT)**: Chọn 1 tệp `.mp3` / `.wav` / `.m4a` ➔ Quét sóng âm thực tế (`silencedetect`) & nhận diện giọng nói AI đa luồng ➔ Xuất 1 tệp `.srt` khớp thời gian thực.
+- **Luồng 2 (Video ➔ MP3 ➔ .SRT)**: Chọn 1 tệp Video (`.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`,...) ➔ Tự động tách ra tệp `.mp3` chuẩn (`192kbps, 48kHz`) khớp thời gian thực ➔ Phân tích & xuất 1 tệp `.srt` khớp thời gian thực.
+- Hỗ trợ 3 chế độ:
+  1. **Nhận diện giọng nói AI (Speech-to-Text)**: Hỗ trợ Tiếng Việt (`vi-VN`), Tiếng Anh (`en-US`), Trung (`zh-CN`), Nhật (`ja-JP`), Hàn (`ko-KR`).
+  2. **Khớp kịch bản văn bản vào sóng âm thực**: Dán văn bản có sẵn để tự căn mốc `Start --> End` theo đúng giọng đọc thực tế.
+  3. **Tách khung thời gian theo nhịp nói**: Tạo nhanh khung mốc thời gian chuẩn theo khoảng nghỉ giọng đọc.
+- Trình biên tập `.SRT` trực tiếp trên màn hình và nút **`➕ ĐƯA SANG RENDER VIDEO`** chỉ với 1 cú nhấp chuột.
 
 ## Build / Publish
 
@@ -29,14 +33,4 @@ dotnet build -c Release
 publish-win-x64.bat
 ```
 
-Đây là **source code**, chưa phải EXE build sẵn.
-
-## Bản sửa riêng cho header/logo (v4.1 Header Alignment Fix)
-
-- Header chuyển thành **3 cột trực tiếp**: logo, tên ứng dụng, trạng thái xuất.
-- Logo căn giữa trong vùng riêng, sử dụng `PictureBoxSizeMode.Zoom`; không đặt `MinimumSize` có thể đẩy hình xuống hoặc làm vỡ layout.
-- Bổ sung `Assets/software-logo-header.png`, là logo gốc **được bỏ vùng trong suốt thừa** và thu nhỏ để tải nhanh hơn. Tệp `Assets/software-logo.png` gốc vẫn giữ nguyên.
-- Phần tên sản phẩm và mô tả sử dụng hai `Label` được căn giữa theo chiều dọc, xử lý cả khi cửa sổ thay đổi kích thước.
-- **Không chỉnh sửa** bất kỳ tệp nào trong `Core/`, không đổi cách xử lý MP3, SRT, overlay hay export.
-
-Sau khi publish, cần đảm bảo có file `publish\\win-x64\\Assets\\software-logo-header.png` cạnh phần mềm (trong thư mục `Assets`). Nếu dùng bản EXE cũ hoặc chưa copy assets mới, header sẽ dùng fallback logo gốc.
+Sau khi publish, tệp thực thi nằm tại `publish\win-x64\LangKinhHuKhong.Editer.exe` (cần có `ffmpeg.exe` và `ffprobe.exe` cạnh tệp `.exe` hoặc trong biến môi trường `PATH` của Windows).
