@@ -8,6 +8,10 @@ public static class FfmpegLocator
     {
         var paths = new[]
         {
+            Path.Combine(AppContext.BaseDirectory, "Runtime"),
+            Path.Combine(AppContext.BaseDirectory, "Runtime", "bin"),
+            Path.Combine(AppContext.BaseDirectory, "Runtime", "ffmpeg"),
+            Path.Combine(AppContext.BaseDirectory, "Runtime", "ffmpeg", "bin"),
             AppContext.BaseDirectory,
             Path.Combine(AppContext.BaseDirectory, "ffmpeg"),
             Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg", "bin"),
@@ -38,6 +42,6 @@ public static class FfmpegLocator
         }
         throw new FileNotFoundException(
             "Không tìm thấy FFmpeg và FFprobe. Hãy đặt ffmpeg.exe và ffprobe.exe " +
-            "cùng thư mục .exe của ứng dụng, hoặc thêm cả hai vào PATH của Windows.");
+            "vào thư mục Runtime (hoặc cạnh file .exe của ứng dụng), hoặc thêm vào PATH của Windows.");
     }
 }
