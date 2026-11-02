@@ -1,0 +1,2 @@
+Runtime/*.exe filter=lfs diff=lfs merge=lfs -text
+Runtime/*.dll filter=lfs diff=lfs merge=lfs -text

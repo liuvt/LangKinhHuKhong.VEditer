@@ -29,11 +29,6 @@ ENV/
 # Local FFmpeg binaries & rendered media outputs
 ffmpeg/
 tools/
-Runtime/*.exe
-Runtime/*.dll
-Runtime/**/*.exe
-Runtime/**/*.dll
-!Runtime/README.md
 LangKinhHuKhong.Output/
 *.mp4
 *.m4a
