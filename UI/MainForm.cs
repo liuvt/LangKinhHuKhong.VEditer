@@ -1206,31 +1206,36 @@ public sealed class MainForm : Form
     {
         var panel = NewCard();
         var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
         _layoutPreview.Dock = DockStyle.Fill;
         _layoutPreview.AllowDrop = true;
-        _layoutPreview.Margin = new Padding(0, 0, 12, 0);
+        _layoutPreview.Margin = new Padding(0, 0, 14, 0);
         _tooltip.SetToolTip(_layoutPreview, "Thả ảnh vào từng phần tư khung preview để gán trực tiếp cho góc tương ứng.");
         table.Controls.Add(_layoutPreview, 0, 0);
 
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 6, ColumnCount = 1 };
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(4, 0, 0, 0) };
         right.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         right.Controls.Add(NewLabel("05  XEM TRƯỚC BỐ CỤC (16:9)", 11, Foreground, true), 0, 0);
-        right.Controls.Add(NewLabel("• Kéo thả ảnh trực tiếp vào 4 phần tư màn hình preview.\n• Phụ đề SRT luôn được vẽ trên lớp cao nhất.", 9, Muted), 0, 1);
-        right.Controls.Add(NewLabel("• Chỉnh kích thước & tọa độ độc lập cho từng góc.\n• Ảnh được giữ trong biên an toàn của khung hình.", 9, Muted), 0, 2);
-        right.Controls.Add(NewLabel("• Tối ưu: chỉ giải mã & scale ảnh 1 lần trong bộ nhớ.\n• Không phát sinh đọc đĩa lặp lại khi chỉnh thông số.", 9, Muted), 0, 3);
-        var refreshRow = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 6, 0, 0) };
-        var refresh = NewButton("LÀM MỚI PREVIEW", true);
-        refresh.Width = 172;
+
+        var desc = NewLabel(
+            "• Kéo thả ảnh trực tiếp vào 4 góc khung Preview.\n" +
+            "• Chỉnh kích thước & tọa độ độc lập từng góc.\n" +
+            "• Phụ đề SRT luôn hiển thị ở lớp trên cùng.",
+            9.25f, Muted);
+        desc.TextAlign = ContentAlignment.TopLeft;
+        desc.Padding = new Padding(0, 8, 0, 0);
+        right.Controls.Add(desc, 0, 1);
+
+        var refreshRow = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 4, 0, 0), Margin = Padding.Empty };
+        var refresh = NewButton("↻  LÀM MỚI PREVIEW", true);
+        refresh.Width = 178;
+        refresh.Height = 38;
         refresh.Click += (_, _) => RefreshLayoutPreview();
         refreshRow.Controls.Add(refresh);
-        right.Controls.Add(refreshRow, 0, 5);
+        right.Controls.Add(refreshRow, 0, 2);
         _editableControls.Add(refresh);
 
         table.Controls.Add(right, 1, 0);
@@ -1879,6 +1884,7 @@ public sealed class MainForm : Form
     private static Label NewLabel(string value, float size, Color color, bool bold = false) => new()
     {
         Text = value, AutoSize = false, Dock = DockStyle.Fill,
+        UseMnemonic = false,
         TextAlign = ContentAlignment.MiddleLeft,
         Font = new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular),
         ForeColor = color, BackColor = Color.Transparent
@@ -1886,7 +1892,8 @@ public sealed class MainForm : Form
 
     private static Label NewInlineLabel(string text, int leftMargin = 12) => new()
     {
-        Text = text, AutoSize = true, ForeColor = Muted, BackColor = Color.Transparent,
+        Text = text, AutoSize = true, UseMnemonic = false,
+        ForeColor = Muted, BackColor = Color.Transparent,
         Margin = new Padding(leftMargin, 7, 4, 0)
     };
 

@@ -188,21 +188,29 @@ internal sealed class StudioButton : Button
         g.FillPath(brush, path);
         g.DrawPath(pen, path);
 
-        var flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
-        flags |= TextAlign switch
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        using var textBrush = new SolidBrush(textCol);
+        using var format = new StringFormat(StringFormatFlags.NoWrap)
         {
-            ContentAlignment.MiddleLeft or ContentAlignment.TopLeft or ContentAlignment.BottomLeft
-                => TextFormatFlags.Left | TextFormatFlags.VerticalCenter,
-            ContentAlignment.MiddleRight or ContentAlignment.TopRight or ContentAlignment.BottomRight
-                => TextFormatFlags.Right | TextFormatFlags.VerticalCenter,
-            _ => TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter,
+            Alignment = TextAlign switch
+            {
+                ContentAlignment.MiddleLeft or ContentAlignment.TopLeft or ContentAlignment.BottomLeft
+                    => StringAlignment.Near,
+                ContentAlignment.MiddleRight or ContentAlignment.TopRight or ContentAlignment.BottomRight
+                    => StringAlignment.Far,
+                _ => StringAlignment.Center
+            }
         };
 
-        var textBounds = new Rectangle(
-            rect.X + Math.Max(8, Padding.Left),
-            rect.Y,
-            Math.Max(1, rect.Width - Math.Max(16, Padding.Horizontal)),
-            rect.Height);
-        TextRenderer.DrawText(g, Text, Font, textBounds, textCol, flags);
+        var padLeft = Math.Max(8, Padding.Left);
+        var padRight = Math.Max(8, Padding.Right);
+        var textBounds = new RectangleF(
+            rect.X + padLeft,
+            rect.Y + 1,
+            Math.Max(1, rect.Width - padLeft - padRight),
+            Math.Max(1, rect.Height - 2));
+        g.DrawString(Text, Font, textBrush, textBounds, format);
     }
 }
