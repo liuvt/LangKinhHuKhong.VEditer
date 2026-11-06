@@ -4,14 +4,17 @@ using System.Text;
 namespace LangKinhHuKhong.Editer.Core;
 
 /// <summary>
-/// v4.2: ALL MP3 tracks => ONE continuous audio track; ALL videos => ONE playlist;
-/// repeat the video playlist only as needed, then render EXACTLY ONE MP4.
-/// Temporary files are created strictly on the target OutputDirectory drive (never bloating C: when exporting to D:),
-/// intermediate artifacts are deleted immediately after each stage, and single-video/single-MP3 jobs bypass redundant temp files.
+/// v4.3: ALL MP3 tracks => ONE continuous high-quality audio track (256kbps AAC);
+/// ALL videos => normalized sequentially with static corner PNG overlays baked once per short clip;
+/// Low-RAM / anti-lag CPU mode (BelowNormal priority, bounded threads & x264 lookahead buffers, CRF 18 quality).
+/// Temporary files are created strictly on the target OutputDirectory drive and deleted immediately after each stage.
 /// </summary>
 public sealed class RenderEngine(FfmpegTools tools)
 {
     private readonly MediaProbe _probe = new(tools);
+
+    private static int GetSafeCpuThreadCount() =>
+        Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
 
     public async Task<string> RenderAsync(
         RenderOptions options,
@@ -38,25 +41,27 @@ public sealed class RenderEngine(FfmpegTools tools)
             if (options != options with { Encoder = effectiveEncoder })
                 options = options with { Encoder = effectiveEncoder };
 
+            var cpuThreads = GetSafeCpuThreadCount().ToString(CultureInfo.InvariantCulture);
             var joinedAudio = Path.Combine(workdir, "joined_audio.m4a");
             var mp3Count = options.Mp3Files.Count;
             var normalizedAudioDurations = new double[mp3Count];
-            var progressLock = new object();
 
             if (mp3Count == 1)
             {
-                // Tối ưu bộ nhớ tạm: Chỉ có 1 MP3 => mã hóa thẳng sang joined_audio.m4a, không tạo file .flac trung gian.
+                // Chỉ có 1 MP3 => mã hóa thẳng sang joined_audio.m4a chất lượng cao (256kbps, 48kHz Stereo), nhẹ RAM.
                 var input = options.Mp3Files[0];
                 var seconds = await _probe.GetDurationSecondsAsync(input, cancellationToken);
-                var title = $"Chuẩn hóa âm thanh: {Path.GetFileName(input)}";
+                var title = $"Chuẩn hóa âm thanh chất lượng cao: {Path.GetFileName(input)}";
                 progress.Report(new RenderProgress(title, 2));
                 var singleAudioArgs = new List<string>
                 {
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                    "-threads", "0", "-stats_period", "0.5", "-progress", "pipe:1",
+                    "-threads", cpuThreads, "-filter_threads", "1",
+                    "-stats_period", "1.0", "-progress", "pipe:1",
+                    "-thread_queue_size", "32",
                     "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn",
                     "-af", "aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo",
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                    "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
                     "-movflags", "+faststart", joinedAudio
                 };
                 await ProcessRunner.RunAsync(tools.Ffmpeg, singleAudioArgs,
@@ -67,69 +72,61 @@ public sealed class RenderEngine(FfmpegTools tools)
             }
             else
             {
-                // Nhiều MP3: chuẩn hóa rồi nối thành joined_audio.m4a, sau đó XÓA NGAY thư mục audio tạm trước khi xử lý video.
+                // Nhiều MP3: xử lý TUẦN TỰ từng file sang .m4a (AAC 256kbps) để không ngốn RAM/CPU,
+                // sau đó nối trực tiếp (-c:a copy) thành joined_audio.m4a và xóa ngay file tạm.
                 Directory.CreateDirectory(audioFolder);
                 var audioClips = new string[mp3Count];
-                var mp3Progress = new double[mp3Count];
-                var audioParallelism = Math.Clamp(Environment.ProcessorCount, 2, 6);
 
-                await Parallel.ForEachAsync(
-                    Enumerable.Range(0, mp3Count),
-                    new ParallelOptions
+                for (var i = 0; i < mp3Count; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var input = options.Mp3Files[i];
+                    var seconds = await _probe.GetDurationSecondsAsync(input, cancellationToken);
+                    var output = Path.Combine(audioFolder, $"{i + 1:D5}.m4a");
+                    var title = $"Chuẩn hóa MP3 {i + 1}/{mp3Count}: {Path.GetFileName(input)}";
+                    var basePct = 16.0 * i / mp3Count;
+                    var stepPct = 16.0 / mp3Count;
+                    progress.Report(new RenderProgress(title, basePct));
+
+                    var args = new List<string>
                     {
-                        MaxDegreeOfParallelism = audioParallelism,
-                        CancellationToken = cancellationToken
-                    },
-                    async (i, ct) =>
-                    {
-                        var input = options.Mp3Files[i];
-                        var seconds = await _probe.GetDurationSecondsAsync(input, ct);
-                        var output = Path.Combine(audioFolder, $"{i + 1:D5}.flac");
-                        var title = $"Chuẩn hóa MP3 {i + 1}/{mp3Count}: {Path.GetFileName(input)}";
-                        var args = new List<string>
-                        {
-                            "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                            "-threads", "0", "-stats_period", "0.5", "-progress", "pipe:1",
-                            "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn",
-                            "-af", "aresample=48000:async=1:first_pts=0,aformat=sample_fmts=s16:channel_layouts=stereo",
-                            "-c:a", "flac", "-compression_level", "5", output
-                        };
-                        await ProcessRunner.RunAsync(tools.Ffmpeg, args,
-                            line => ReportFfmpegProgress(line, seconds, p =>
-                            {
-                                double avg;
-                                lock (progressLock)
-                                {
-                                    mp3Progress[i] = p;
-                                    avg = mp3Progress.Sum() / mp3Count;
-                                }
-                                progress.Report(new RenderProgress(title, 15.0 * avg));
-                            }), ct, workdir);
-                        audioClips[i] = output;
-                        normalizedAudioDurations[i] = await _probe.GetDurationSecondsAsync(output, ct);
-                        lock (progressLock) mp3Progress[i] = 1.0;
-                    });
+                        "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                        "-threads", cpuThreads, "-filter_threads", "1",
+                        "-stats_period", "1.0", "-progress", "pipe:1",
+                        "-thread_queue_size", "32",
+                        "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn",
+                        "-af", "aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo",
+                        "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+                        output
+                    };
+                    await ProcessRunner.RunAsync(tools.Ffmpeg, args,
+                        line => ReportFfmpegProgress(line, seconds, p =>
+                            progress.Report(new RenderProgress(title, basePct + stepPct * p))),
+                        cancellationToken, workdir);
+                    audioClips[i] = output;
+                    normalizedAudioDurations[i] = await _probe.GetDurationSecondsAsync(output, cancellationToken);
+                }
 
                 var estimatedAudioDuration = normalizedAudioDurations.Sum();
                 var audioList = Path.Combine(workdir, "audio.ffconcat");
                 await WriteConcatListAsync(audioList, "audio", audioClips, cancellationToken);
-                const string joinTitle = "Ghép tất cả MP3 thành một audio liên tục";
-                progress.Report(new RenderProgress(joinTitle, 15));
+                const string joinTitle = "Ghép nối liền mạch tất cả MP3 chất lượng cao";
+                progress.Report(new RenderProgress(joinTitle, 16));
                 var joinArgs = new List<string>
                 {
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                    "-threads", "0", "-stats_period", "0.5", "-progress", "pipe:1",
+                    "-threads", "1", "-stats_period", "1.0", "-progress", "pipe:1",
                     "-safe", "0", "-f", "concat", "-i", audioList,
                     "-map", "0:a:0", "-vn", "-sn", "-dn",
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                    "-c:a", "copy",
                     "-movflags", "+faststart", joinedAudio
                 };
                 await ProcessRunner.RunAsync(tools.Ffmpeg, joinArgs,
                     line => ReportFfmpegProgress(line, estimatedAudioDuration, p =>
-                        progress.Report(new RenderProgress(joinTitle, 15.0 + 5.0 * p))),
+                        progress.Report(new RenderProgress(joinTitle, 16.0 + 4.0 * p))),
                     cancellationToken, workdir);
 
-                // Giải phóng ngay toàn bộ file .flac tạm sau khi đã có joined_audio.m4a
+                // Giải phóng ngay toàn bộ file âm thanh tạm trước khi sang bước xử lý video
                 DeleteDirectorySafe(audioFolder);
                 TryDeleteFile(audioList);
             }
@@ -140,88 +137,61 @@ public sealed class RenderEngine(FfmpegTools tools)
             var mergedSubtitleFile = Path.Combine(workdir, "joined_subtitles.srt");
             if (options.Subtitles is { SrtFiles.Count: > 0 } sub)
             {
-                progress.Report(new RenderProgress("Đồng bộ mốc SRT theo audio đã nối...", 19));
+                progress.Report(new RenderProgress("Đồng bộ mốc SRT theo audio đã nối...", 20));
                 var cues = SubtitleComposer.Merge(sub, normalizedAudioDurations, audioDuration);
                 await SubtitleComposer.WriteSrtAsync(mergedSubtitleFile, cues, cancellationToken);
             }
 
-            // Kiểm tra xem có thể dùng luồng Stream trực tiếp (không tạo file clip .mp4 trung gian) hay không:
-            // Khi có 1 video nguồn, tốc độ 1.0x và tắt âm gốc => xử lý trực tiếp trên RAM ở Bước 4, tốn 0 byte file video tạm!
-            var canStreamSingleVideoDirectly =
-                options.Videos.Count == 1 &&
-                options.MuteVideoAudio &&
-                Math.Abs(options.Videos[0].PlaybackSpeed - 1.0) < 0.000001;
+            // Step 3: Chuẩn hóa TUẦN TỰ từng video (1 tiến trình duy nhất tại mỗi thời điểm để bảo vệ RAM & tránh lag),
+            // đồng thời gộp luôn 0–4 ảnh góc PNG tĩnh vào clip chuẩn hóa để Bước 4 không phải lọc lại hàng triệu frame.
+            Directory.CreateDirectory(clipsFolder);
+            var videoCount = options.Videos.Count;
+            var videoClips = new List<string>(videoCount);
+            var clipDurations = new List<double>(videoCount);
+            var accumulatedDuration = 0.0;
 
-            string videoInputPath;
-            bool isConcatPlaylist;
-            double playlistDuration;
-
-            if (canStreamSingleVideoDirectly)
+            for (var i = 0; i < videoCount; i++)
             {
-                videoInputPath = options.Videos[0].FilePath;
-                isConcatPlaylist = false;
-                playlistDuration = await _probe.GetDurationSecondsAsync(videoInputPath, cancellationToken);
-                progress.Report(new RenderProgress("Chế độ Stream trực tiếp: Không tạo file video tạm, bắt đầu kết xuất...", 50));
-            }
-            else
-            {
-                // Step 3: normalize each video using ITS OWN playback speed and the selected export resolution/FPS.
-                Directory.CreateDirectory(clipsFolder);
-                var videoCount = options.Videos.Count;
-                var videoClips = new string[videoCount];
-                var clipDurations = new double[videoCount];
-                var videoProgress = new double[videoCount];
-                var videoParallelism = options.Encoder == VideoEncoder.Nvenc
-                    ? Math.Min(2, Math.Max(1, videoCount))
-                    : Math.Clamp(Environment.ProcessorCount / 2, 1, 2);
+                cancellationToken.ThrowIfCancellationRequested();
+                // Nếu tổng thời lượng các clip đã chuẩn hóa đủ phủ hết thời lượng audio thì dừng ngay, không xử lý thừa
+                if (accumulatedDuration >= audioDuration && videoClips.Count > 0)
+                    break;
 
-                await Parallel.ForEachAsync(
-                    Enumerable.Range(0, videoCount),
-                    new ParallelOptions
-                    {
-                        MaxDegreeOfParallelism = videoParallelism,
-                        CancellationToken = cancellationToken
-                    },
-                    async (i, ct) =>
-                    {
-                        var video = options.Videos[i];
-                        var sourceDuration = await _probe.GetDurationSecondsAsync(video.FilePath, ct);
-                        var expectedDuration = sourceDuration / video.PlaybackSpeed;
-                        var clipFile = Path.Combine(clipsFolder, $"{i + 1:D5}.mp4");
-                        var title = $"Chuẩn hóa video {i + 1}/{videoCount} ({PlaybackSpeeds.Format(video.PlaybackSpeed)}): {Path.GetFileName(video.FilePath)}";
-                        var hasAudio = !options.MuteVideoAudio &&
-                            await _probe.HasAudioStreamAsync(video.FilePath, ct);
-                        var args = BuildNormalizeArguments(options, video, video.FilePath,
-                            clipFile, expectedDuration, hasAudio);
-                        await ProcessRunner.RunAsync(tools.Ffmpeg, args,
-                            line => ReportFfmpegProgress(line, expectedDuration, p =>
-                            {
-                                double avg;
-                                lock (progressLock)
-                                {
-                                    videoProgress[i] = p;
-                                    avg = videoProgress.Sum() / videoCount;
-                                }
-                                progress.Report(new RenderProgress(title, 20.0 + 35.0 * avg));
-                            }),
-                            ct, workdir);
-                        clipDurations[i] = await _probe.GetDurationSecondsAsync(clipFile, ct);
-                        videoClips[i] = clipFile;
-                        lock (progressLock) videoProgress[i] = 1.0;
-                    });
+                var video = options.Videos[i];
+                var sourceDuration = await _probe.GetDurationSecondsAsync(video.FilePath, cancellationToken);
+                var rawExpectedDuration = sourceDuration / video.PlaybackSpeed;
+                var remainingNeeded = Math.Max(0.5, audioDuration - accumulatedDuration);
+                var expectedDuration = Math.Min(rawExpectedDuration, remainingNeeded);
 
-                playlistDuration = clipDurations.Sum();
-                var videoList = Path.Combine(workdir, "playlist.ffconcat");
-                await WriteConcatListAsync(videoList, "clips", videoClips, cancellationToken);
-                videoInputPath = videoList;
-                isConcatPlaylist = true;
+                var clipFile = Path.Combine(clipsFolder, $"{i + 1:D5}.mp4");
+                var title = $"Chuẩn hóa video chất lượng cao {i + 1}/{videoCount} ({PlaybackSpeeds.Format(video.PlaybackSpeed)}): {Path.GetFileName(video.FilePath)}";
+                var basePct = 20.0 + 35.0 * i / videoCount;
+                var stepPct = 35.0 / videoCount;
+                progress.Report(new RenderProgress(title, basePct));
+
+                var hasAudio = !options.MuteVideoAudio &&
+                    await _probe.HasAudioStreamAsync(video.FilePath, cancellationToken);
+                var args = BuildNormalizeArguments(options, video, video.FilePath,
+                    clipFile, expectedDuration, hasAudio);
+                await ProcessRunner.RunAsync(tools.Ffmpeg, args,
+                    line => ReportFfmpegProgress(line, expectedDuration, p =>
+                        progress.Report(new RenderProgress(title, basePct + stepPct * p))),
+                    cancellationToken, workdir);
+
+                var actualClipDuration = await _probe.GetDurationSecondsAsync(clipFile, cancellationToken);
+                clipDurations.Add(actualClipDuration);
+                videoClips.Add(clipFile);
+                accumulatedDuration += actualClipDuration;
             }
 
-            // Step 4: loop the ENTIRE ordered video playlist when necessary.
-            // Output always ends at the joined audio duration, never per input MP3.
+            var playlistDuration = clipDurations.Sum();
+            var videoList = Path.Combine(workdir, "playlist.ffconcat");
+            await WriteConcatListAsync(videoList, "clips", videoClips, cancellationToken);
+
+            // Step 4: Lặp danh sách video đã chuẩn hóa theo đúng tổng thời lượng audio MP3.
             var cycles = Math.Max(1, (int)Math.Ceiling(audioDuration / Math.Max(0.1, playlistDuration)));
-            var startPct = canStreamSingleVideoDirectly ? 20.0 : 55.0;
-            var spanPct = 100.0 - startPct;
+            const double startPct = 55.0;
+            const double spanPct = 45.0;
             var finalTitle = $"Xuất 1 MP4 | Audio {TimeSpan.FromSeconds(audioDuration).ToString("c", CultureInfo.InvariantCulture)} | " +
                              $"Playlist video {TimeSpan.FromSeconds(playlistDuration).ToString("c", CultureInfo.InvariantCulture)} | " +
                              $"{cycles} lượt phát";
@@ -229,7 +199,7 @@ public sealed class RenderEngine(FfmpegTools tools)
             var outputFile = GetUniqueOutputFile(fullOutputDir, "LangKinhHuKhong_Full", options.ResolutionName,
                 options.Subtitles is { SrtFiles.Count: > 0, SaveSidecarSrt: true });
             var temporaryOutput = Path.Combine(workdir, "final_render.mp4");
-            var finalArgs = BuildOutputArguments(options, videoInputPath, isConcatPlaylist, joinedAudio, temporaryOutput, audioDuration);
+            var finalArgs = BuildOutputArguments(options, videoList, joinedAudio, temporaryOutput, audioDuration);
             await ProcessRunner.RunAsync(tools.Ffmpeg, finalArgs,
                 line => ReportFfmpegProgress(line, audioDuration, p =>
                     progress.Report(new RenderProgress(finalTitle, startPct + spanPct * p))),
@@ -315,92 +285,151 @@ public sealed class RenderEngine(FfmpegTools tools)
         RenderOptions settings, VideoClipOption video, string sourceFile, string clipFile,
         double expectedDuration, bool hasSourceAudio)
     {
+        var cpuThreads = GetSafeCpuThreadCount().ToString(CultureInfo.InvariantCulture);
         var duration = expectedDuration.ToString("F6", CultureInfo.InvariantCulture);
         var args = new List<string>
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-            "-threads", "0", "-filter_threads", "0",
-            "-stats_period", "0.5", "-progress", "pipe:1",
-            "-thread_queue_size", "1024", "-i", sourceFile
+            "-threads", cpuThreads, "-filter_threads", "1", "-filter_complex_threads", "1",
+            "-stats_period", "1.0", "-progress", "pipe:1",
+            "-thread_queue_size", "32", "-i", sourceFile
         };
         if (!settings.MuteVideoAudio && !hasSourceAudio)
             args.AddRange(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]);
 
-        var videoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed) +
-            ",tpad=stop_mode=clone:stop_duration=0.10," +
-            $"trim=duration={duration},setpts=PTS-STARTPTS";
-        if (settings.MuteVideoAudio)
-            args.AddRange(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", videoFilter]);
+        var overlayStartInputIndex = (!settings.MuteVideoAudio && !hasSourceAudio) ? 2 : 1;
+        foreach (var overlay in settings.Overlays)
+            args.AddRange(["-i", overlay.ImagePath]);
+
+        var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed) +
+            $",trim=duration={duration},setpts=PTS-STARTPTS";
+
+        if (settings.MuteVideoAudio && settings.Overlays.Count == 0)
+        {
+            args.AddRange(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", baseVideoFilter]);
+        }
         else
         {
-            var audioStart = hasSourceAudio
-                ? $"[0:a:0]{PlaybackSpeeds.AudioTempo(video.PlaybackSpeed)},aresample=48000:async=1:first_pts=0,"
-                : "[1:a]aresample=48000:async=1:first_pts=0,";
-            var graph = $"[0:v]{videoFilter}[vnorm];" + audioStart +
-                        $"aformat=channel_layouts=stereo,apad,atrim=duration={duration},asetpts=PTS-STARTPTS[anorm]";
-            args.AddRange(["-filter_complex", graph, "-map", "[vnorm]", "-map", "[anorm]"]);
+            var filters = new List<string> { $"[0:v]{baseVideoFilter}[v0]" };
+            AppendOverlayStages(filters, settings, overlayStartInputIndex);
+            filters.Add($"[v{settings.Overlays.Count}]format=yuv420p[vnorm]");
+
+            if (!settings.MuteVideoAudio)
+            {
+                var audioStart = hasSourceAudio
+                    ? $"[0:a:0]{PlaybackSpeeds.AudioTempo(video.PlaybackSpeed)},aresample=48000:async=1:first_pts=0,"
+                    : "[1:a]aresample=48000:async=1:first_pts=0,";
+                filters.Add(audioStart + $"aformat=channel_layouts=stereo,apad,atrim=duration={duration},asetpts=PTS-STARTPTS[anorm]");
+            }
+
+            args.AddRange(["-filter_complex", string.Join(';', filters), "-map", "[vnorm]"]);
+            if (settings.MuteVideoAudio)
+                args.AddRange(["-an", "-sn", "-dn"]);
+            else
+                args.AddRange(["-map", "[anorm]"]);
         }
 
-        // Chế độ ổn định (libx264): dùng preset veryfast + crf 23 thay vì ultrafast crf 18
-        // để giảm 75-85% dung lượng file tạm trung gian mà vẫn giữ chất lượng hình ảnh tốt.
+        // Chế độ ổn định (libx264): ưu tiên chất lượng hình ảnh cao (CRF 18, preset medium, profile high)
+        // đồng thời giới hạn rc_lookahead / sync_lookahead để giữ mức RAM cực thấp, không gây lag máy.
         if (settings.Encoder == VideoEncoder.Nvenc)
-            args.AddRange(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0"]);
+        {
+            args.AddRange(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "19", "-b:v", "0"]);
+        }
         else
-            args.AddRange(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]);
+        {
+            args.AddRange([
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high",
+                "-x264-params", $"threads={cpuThreads}:lookahead_threads=1:rc_lookahead=8:sync_lookahead=1:ref=2:bframes=2"
+            ]);
+        }
 
         args.AddRange([
             "-pix_fmt", "yuv420p", "-r", settings.FrameRate.ToString(CultureInfo.InvariantCulture),
             "-video_track_timescale", "30000"
         ]);
         if (!settings.MuteVideoAudio)
-            args.AddRange(["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]);
+            args.AddRange(["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2"]);
         args.AddRange(["-t", duration, "-movflags", "+faststart", clipFile]);
         return args;
     }
 
     private static List<string> BuildOutputArguments(
-        RenderOptions settings, string videoInputPath, bool isConcatPlaylist, string joinedAudio, string outputFile,
+        RenderOptions settings, string videoListPath, string joinedAudio, string outputFile,
         double audioDuration)
     {
+        var cpuThreads = GetSafeCpuThreadCount().ToString(CultureInfo.InvariantCulture);
+        var hasBurnInSubtitles = settings.Subtitles is { SrtFiles.Count: > 0, BurnIntoVideo: true };
+
         var args = new List<string>
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-            "-threads", "0", "-filter_threads", "0", "-filter_complex_threads", "0",
-            "-stats_period", "0.5", "-progress", "pipe:1",
-            "-thread_queue_size", "2048",
-            "-stream_loop", "-1" // always repeat the entire playlist/video if audio is longer
+            "-threads", cpuThreads, "-filter_threads", "1", "-filter_complex_threads", "1",
+            "-stats_period", "1.0", "-progress", "pipe:1",
+            "-thread_queue_size", "16",
+            "-stream_loop", "-1", // lặp danh sách clip đã chuẩn hóa theo đúng tổng thời lượng audio
+            "-safe", "0", "-f", "concat", "-i", videoListPath,
+            "-thread_queue_size", "16", "-i", joinedAudio
         };
-        if (isConcatPlaylist)
-            args.AddRange(["-safe", "0", "-f", "concat"]);
-        args.AddRange(["-i", videoInputPath, "-thread_queue_size", "2048", "-i", joinedAudio]);
 
-        // Nạp mỗi ảnh tĩnh 1 frame duy nhất; bộ lọc overlay với eof_action=repeat sẽ tự giữ frame RGBA
-        foreach (var overlay in settings.Overlays)
-            args.AddRange(["-i", overlay.ImagePath]);
-
-        var filter = BuildOverlayFilter(settings, normalizeOnTheFly: !isConcatPlaylist);
-        if (!settings.MuteVideoAudio)
+        if (!hasBurnInSubtitles && settings.MuteVideoAudio)
         {
-            filter += ";[0:a:0]aresample=async=1:first_pts=0,volume=0.20[gameaudio]" +
-                      ";[1:a:0]aresample=async=1:first_pts=0,apad[voice]" +
-                      ";[voice][gameaudio]amix=inputs=2:duration=longest:" +
-                      "dropout_transition=0:normalize=0,aresample=async=1[aout]";
+            // Không chèn phụ đề cứng & tắt âm gốc: các clip trong playlist đã có sẵn ảnh góc PNG và chuẩn H.264 CRF 18,
+            // nên sao chép luồng trực tiếp (-c:v copy -c:a copy) => tốn < 30MB RAM, không tái mã hóa, giữ 100% chất lượng gốc!
+            args.AddRange(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "copy"]);
         }
-        args.AddRange(["-filter_complex", filter, "-map", "[vout]", "-map",
-            settings.MuteVideoAudio ? "1:a:0" : "[aout]"]);
-
-        if (settings.Encoder == VideoEncoder.Nvenc)
-            args.AddRange(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0"]);
+        else if (!hasBurnInSubtitles && !settings.MuteVideoAudio)
+        {
+            // Không chèn phụ đề cứng nhưng giữ 20% âm gốc: giữ nguyên luồng video (-c:v copy), chỉ trộn âm thanh chất lượng cao.
+            const string audioMixFilter =
+                "[1:a:0]aresample=48000:async=1:first_pts=0[voice];" +
+                "[0:a:0]aresample=48000:async=1:first_pts=0,volume=0.20[gameaudio];" +
+                "[voice][gameaudio]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,aresample=48000:async=1[aout]";
+            args.AddRange([
+                "-filter_complex", audioMixFilter,
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2"
+            ]);
+        }
         else
-            args.AddRange(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]);
+        {
+            // Có chèn phụ đề cứng (BurnIntoVideo): phụ đề được vẽ lên lớp trên cùng (trên cả 4 ảnh góc PNG đã gộp ở Bước 3).
+            var escapedSub = SubtitleComposer.BuildBurnInFilter(settings.Subtitles!);
+            var filter = $"[0:v]setpts=PTS-STARTPTS,{escapedSub},format=yuv420p[vout]";
+            if (!settings.MuteVideoAudio)
+            {
+                filter += ";[1:a:0]aresample=48000:async=1:first_pts=0[voice]" +
+                          ";[0:a:0]aresample=48000:async=1:first_pts=0,volume=0.20[gameaudio]" +
+                          ";[voice][gameaudio]amix=inputs=2:duration=first:" +
+                          "dropout_transition=0:normalize=0,aresample=48000:async=1[aout]";
+            }
+            args.AddRange([
+                "-filter_complex", filter,
+                "-map", "[vout]",
+                "-map", settings.MuteVideoAudio ? "1:a:0" : "[aout]"
+            ]);
 
-        if (settings.MuteVideoAudio)
-            args.AddRange(["-c:a", "copy"]);
-        else
-            args.AddRange(["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]);
+            if (settings.Encoder == VideoEncoder.Nvenc)
+            {
+                args.AddRange(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "19", "-b:v", "0"]);
+            }
+            else
+            {
+                args.AddRange([
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high",
+                    "-x264-params", $"threads={cpuThreads}:lookahead_threads=1:rc_lookahead=8:sync_lookahead=1:ref=2:bframes=2"
+                ]);
+            }
+
+            if (settings.MuteVideoAudio)
+                args.AddRange(["-c:a", "copy"]);
+            else
+                args.AddRange(["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2"]);
+
+            args.AddRange(["-pix_fmt", "yuv420p", "-r", settings.FrameRate.ToString(CultureInfo.InvariantCulture)]);
+        }
 
         args.AddRange([
-            "-pix_fmt", "yuv420p", "-r", settings.FrameRate.ToString(CultureInfo.InvariantCulture),
             "-t", audioDuration.ToString("F6", CultureInfo.InvariantCulture),
             "-map_metadata", "-1", "-map_chapters", "-1",
             "-movflags", "+faststart", outputFile
@@ -408,12 +437,8 @@ public sealed class RenderEngine(FfmpegTools tools)
         return args;
     }
 
-    private static string BuildOverlayFilter(RenderOptions settings, bool normalizeOnTheFly = false)
+    private static void AppendOverlayStages(List<string> filters, RenderOptions settings, int startInputIndex)
     {
-        var initial = normalizeOnTheFly
-            ? $"[0:v]{BuildNormalizeFilter(settings, 1.0)}"
-            : "[0:v]setpts=PTS-STARTPTS";
-        var filters = new List<string> { initial + "[v0]" };
         for (var i = 0; i < settings.Overlays.Count; i++)
         {
             var overlay = settings.Overlays[i];
@@ -429,22 +454,12 @@ public sealed class RenderEngine(FfmpegTools tools)
             var y = overlay.Corner is Corner.TopLeft or Corner.TopRight
                 ? $"min({offsetY}\\,H-h)"
                 : $"max(0\\,H-h-{offsetY})";
-            filters.Add($"[{i + 2}:v]scale={maxWidth}:{maxHeight}:" +
+            filters.Add($"[{startInputIndex + i}:v]scale={maxWidth}:{maxHeight}:" +
                         "force_original_aspect_ratio=decrease:flags=lanczos," +
                         $"format=rgba[logo{i}]");
             filters.Add($"[v{i}][logo{i}]overlay=x={x}:y={y}:" +
                         $"eof_action=repeat:format=auto[v{i + 1}]");
         }
-        var lastVideo = $"[v{settings.Overlays.Count}]";
-        // v2: subtitles/text must be the topmost layer, above all PNG overlays.
-        if (settings.Subtitles is { SrtFiles.Count: > 0, BurnIntoVideo: true } sub)
-        {
-            var escaped = SubtitleComposer.BuildBurnInFilter(sub);
-            filters.Add($"{lastVideo}{escaped}[vsub]");
-            lastVideo = "[vsub]";
-        }
-        filters.Add($"{lastVideo}format=yuv420p[vout]");
-        return string.Join(';', filters);
     }
 
     private async Task<VideoEncoder> ResolveEncoderAsync(VideoEncoder requested, CancellationToken cancellationToken, string workdir)
@@ -522,16 +537,9 @@ public sealed class RenderEngine(FfmpegTools tools)
     private static void ReportFfmpegProgress(string line, double totalSeconds, Action<double> callback)
     {
         if (totalSeconds <= 0) return;
-        if (line.StartsWith("out_time_us=", StringComparison.Ordinal))
-        {
-            if (long.TryParse(line.AsSpan(12).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var us) && us >= 0)
-                callback(Math.Clamp(us / 1_000_000.0 / totalSeconds, 0, 1));
-            return;
-        }
-        if (!line.StartsWith("out_time=", StringComparison.Ordinal)) return;
-        var raw = line.AsSpan(9).Trim();
-        if (raw.Length > 0 && raw[0] != '-' && TimeSpan.TryParse(raw, CultureInfo.InvariantCulture, out var time))
-            callback(Math.Clamp(time.TotalSeconds / totalSeconds, 0, 1));
+        if (!line.StartsWith("out_time_us=", StringComparison.Ordinal)) return;
+        if (long.TryParse(line.AsSpan(12).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var us) && us >= 0)
+            callback(Math.Clamp(us / 1_000_000.0 / totalSeconds, 0, 1));
     }
 
     private static string GetUniqueOutputFile(string folder, string name, string resolution, bool includeSidecar)

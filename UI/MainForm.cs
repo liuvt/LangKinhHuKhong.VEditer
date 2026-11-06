@@ -682,7 +682,11 @@ public sealed class MainForm : Form
                     _status.Text = p.Stage;
                 }
                 if (p.Percent is double percent)
-                    _progress.Value = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
+                {
+                    var nextVal = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
+                    if (_progress.Value != nextVal)
+                        _progress.Value = nextVal;
+                }
             });
 
             var genOptions = new SrtGenerationOptions(
@@ -1789,7 +1793,11 @@ public sealed class MainForm : Form
                     _status.Text = p.Stage;
                 }
                 if (p.Percent is double percent)
-                    _progress.Value = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
+                {
+                    var nextVal = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
+                    if (_progress.Value != nextVal)
+                        _progress.Value = nextVal;
+                }
             });
             var output = await new RenderEngine(tools).RenderAsync(options, reporter, _cts.Token);
             if (!IsDisposed)

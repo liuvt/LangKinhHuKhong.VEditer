@@ -36,7 +36,7 @@ public static class ProcessRunner
         using var process = new Process { StartInfo = info };
         if (!process.Start())
             throw new InvalidOperationException($"Không thể khởi động {executable}.");
-        try { process.PriorityClass = ProcessPriorityClass.AboveNormal; }
+        try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
         catch { /* Một số môi trường hạn chế quyền đổi độ ưu tiên tiến trình */ }
 
         static void TryKillProcess(Process proc)

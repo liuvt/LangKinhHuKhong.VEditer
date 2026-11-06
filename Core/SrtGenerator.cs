@@ -109,7 +109,7 @@ public sealed partial class SrtGenerator(FfmpegTools tools)
                 var extractArgs = new List<string>
                 {
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                    "-threads", "0", "-stats_period", "0.25", "-progress", "pipe:1",
+                    "-threads", "2", "-stats_period", "0.5", "-progress", "pipe:1",
                     "-i", options.InputFilePath, "-map", "0:a:0", "-vn", "-sn", "-dn",
                     "-af", "aresample=48000:async=1:first_pts=0",
                     "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2",
@@ -227,12 +227,13 @@ public sealed partial class SrtGenerator(FfmpegTools tools)
             StandardErrorEncoding = Encoding.UTF8,
             WorkingDirectory = AppContext.BaseDirectory
         };
-        foreach (var arg in new[] { "-nostdin", "-hide_banner", "-threads", "0", "-i", audioFile, "-vn", "-sn", "-dn", "-af", filter, "-f", "null", "-" })
+        foreach (var arg in new[] { "-nostdin", "-hide_banner", "-threads", "2", "-i", audioFile, "-vn", "-sn", "-dn", "-af", filter, "-f", "null", "-" })
             info.ArgumentList.Add(arg);
 
         using var process = new System.Diagnostics.Process { StartInfo = info };
         if (!process.Start())
             throw new InvalidOperationException("Không thể chạy FFmpeg để phân tích sóng âm.");
+        try { process.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; } catch { }
 
         using var reg = cancellationToken.Register(() =>
         {
