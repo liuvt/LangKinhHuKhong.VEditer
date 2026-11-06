@@ -12,6 +12,9 @@ public static class ProcessRunner
         CancellationToken cancellationToken,
         string? workingDirectory = null)
     {
+        var effectiveWorkDir = !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory)
+            ? workingDirectory
+            : AppContext.BaseDirectory;
         var info = new ProcessStartInfo(executable)
         {
             CreateNoWindow = true,
@@ -20,8 +23,13 @@ public static class ProcessRunner
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
-            WorkingDirectory = workingDirectory ?? AppContext.BaseDirectory
+            WorkingDirectory = effectiveWorkDir
         };
+        if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+        {
+            info.Environment["TEMP"] = workingDirectory;
+            info.Environment["TMP"] = workingDirectory;
+        }
         foreach (var argument in arguments)
             info.ArgumentList.Add(argument);
 

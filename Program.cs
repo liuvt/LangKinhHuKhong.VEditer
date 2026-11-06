@@ -20,6 +20,14 @@ internal static class Program
 
     private static void ConfigureRuntimeDirectory()
     {
+        try
+        {
+            var legacyTemp = Path.Combine(Path.GetTempPath(), "LangKinhHuKhong.Editer");
+            if (Directory.Exists(legacyTemp))
+                Directory.Delete(legacyTemp, recursive: true);
+        }
+        catch { }
+
         var runtimeDir = Path.Combine(AppContext.BaseDirectory, "Runtime");
         try
         {

@@ -75,12 +75,15 @@ public sealed partial class SrtGenerator(FfmpegTools tools)
         if (string.IsNullOrWhiteSpace(options.OutputSrtPath))
             throw new ArgumentException("Chưa chọn đường dẫn lưu tệp SRT.");
 
-        var outDir = Path.GetDirectoryName(Path.GetFullPath(options.OutputSrtPath));
-        if (!string.IsNullOrWhiteSpace(outDir))
-            Directory.CreateDirectory(outDir);
+        var outDir = Path.GetDirectoryName(Path.GetFullPath(options.OutputSrtPath))
+                     ?? Path.GetDirectoryName(Path.GetFullPath(options.InputFilePath))
+                     ?? AppContext.BaseDirectory;
+        Directory.CreateDirectory(outDir);
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "LangKinhHuKhong.Editer", "srt_" + Guid.NewGuid().ToString("N"));
+        // Đặt thư mục tạm ngay trên cùng ổ đĩa với nơi xuất SRT để không làm tăng dung lượng ổ C:
+        var tempDir = Path.Combine(outDir, ".lkhk_srt_temp_" + Guid.NewGuid().ToString("N")[..10]);
         Directory.CreateDirectory(tempDir);
+        try { File.SetAttributes(tempDir, FileAttributes.Directory | FileAttributes.Hidden); } catch { }
 
         string workingMp3Path;
         string? savedMp3Path = null;
@@ -186,9 +189,7 @@ public sealed partial class SrtGenerator(FfmpegTools tools)
         }
         finally
         {
-            try { Directory.Delete(tempDir, recursive: true); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            RenderEngine.DeleteDirectorySafe(tempDir);
         }
     }
 
