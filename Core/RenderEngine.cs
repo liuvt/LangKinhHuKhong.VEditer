@@ -142,6 +142,31 @@ public sealed class RenderEngine(FfmpegTools tools)
                 await SubtitleComposer.WriteSrtAsync(mergedSubtitleFile, cues, cancellationToken);
             }
 
+            // Tiền xử lý (Pre-scale) 0–4 ảnh góc PNG về đúng kích thước đích RGBA một lần duy nhất:
+            // Kết hợp với -loop 1 -framerate <fps> ở Bước 3 giúp 4 ảnh góc LUÔN HIỂN THỊ XUYÊN SUỐT ĐẾN HẾT CLIP
+            // (kể cả khi video nguồn tự đổi độ phân giải giữa chừng làm FFmpeg khởi tạo lại filtergraph) mà vẫn siêu nhẹ RAM/CPU.
+            if (options.Overlays.Count > 0)
+            {
+                var preparedOverlays = new List<OverlayOption>(options.Overlays.Count);
+                for (var i = 0; i < options.Overlays.Count; i++)
+                {
+                    var ov = options.Overlays[i];
+                    var maxW = Math.Max(16, options.Width * Math.Clamp(ov.WidthPercent, 1, 100) / 100);
+                    var maxH = Math.Max(16, options.Height * Math.Clamp(ov.HeightPercent, 1, 100) / 100);
+                    var scaledPng = Path.Combine(workdir, $"overlay_scaled_{i}.png");
+                    var prepArgs = new[]
+                    {
+                        "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", ov.ImagePath,
+                        "-vf", $"scale={maxW}:{maxH}:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba",
+                        "-compression_level", "1", "-frames:v", "1", "-update", "1", scaledPng
+                    };
+                    await ProcessRunner.RunAsync(tools.Ffmpeg, prepArgs, null, cancellationToken, workdir);
+                    preparedOverlays.Add(ov with { ImagePath = scaledPng });
+                }
+                options = options with { Overlays = preparedOverlays };
+            }
+
             // Step 3: Chuẩn hóa TUẦN TỰ từng video (1 tiến trình duy nhất tại mỗi thời điểm để bảo vệ RAM & tránh lag),
             // đồng thời gộp luôn 0–4 ảnh góc PNG tĩnh vào clip chuẩn hóa để Bước 4 không phải lọc lại hàng triệu frame.
             Directory.CreateDirectory(clipsFolder);
@@ -298,8 +323,14 @@ public sealed class RenderEngine(FfmpegTools tools)
             args.AddRange(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]);
 
         var overlayStartInputIndex = (!settings.MuteVideoAudio && !hasSourceAudio) ? 2 : 1;
+        var fpsText = settings.FrameRate.ToString(CultureInfo.InvariantCulture);
         foreach (var overlay in settings.Overlays)
-            args.AddRange(["-i", overlay.ImagePath]);
+        {
+            // Bắt buộc dùng -loop 1 -framerate <fps> trên ảnh góc đã pre-scale:
+            // Khi video nguồn thay đổi độ phân giải giữa chừng (ví dụ 1280x612 -> 1280x574 ở giây thứ 1),
+            // FFmpeg sẽ reconfigure filtergraph; nhờ -loop 1 luồng ảnh luôn cấp frame liên tục giúp 4 ảnh góc kéo dài đến hết clip!
+            args.AddRange(["-thread_queue_size", "8", "-loop", "1", "-framerate", fpsText, "-i", overlay.ImagePath]);
+        }
 
         var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed) +
             $",trim=duration={duration},setpts=PTS-STARTPTS";
