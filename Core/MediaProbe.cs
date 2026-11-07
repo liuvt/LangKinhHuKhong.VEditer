@@ -33,4 +33,15 @@ public sealed class MediaProbe(FfmpegTools tools)
         return !string.IsNullOrWhiteSpace(output);
     }
 
+    public async Task<string> GetVideoCodecNameAsync(string file, CancellationToken cancellationToken)
+    {
+        var args = new[]
+        {
+            "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1", file
+        };
+        var output = await ProcessRunner.RunAsync(tools.Ffprobe, args, null, cancellationToken);
+        return output.Trim().ToLowerInvariant();
+    }
+
 }
