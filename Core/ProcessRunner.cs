@@ -10,7 +10,8 @@ public static class ProcessRunner
         IEnumerable<string> arguments,
         Action<string>? onStdout,
         CancellationToken cancellationToken,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        bool highPerformance = false)
     {
         var effectiveWorkDir = !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory)
             ? workingDirectory
@@ -36,7 +37,12 @@ public static class ProcessRunner
         using var process = new Process { StartInfo = info };
         if (!process.Start())
             throw new InvalidOperationException($"Không thể khởi động {executable}.");
-        try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
+        try
+        {
+            process.PriorityClass = highPerformance
+                ? ProcessPriorityClass.AboveNormal
+                : ProcessPriorityClass.BelowNormal;
+        }
         catch { /* Một số môi trường hạn chế quyền đổi độ ưu tiên tiến trình */ }
 
         static void TryKillProcess(Process proc)

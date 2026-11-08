@@ -1500,10 +1500,11 @@ public sealed class MainForm : Form
         optionsRow.Controls.Add(_encoder);
         table.Controls.Add(optionsRow, 0, 2);
 
-        var autoLoopNote = NewLabel("Hệ thống chuẩn hóa đa nhân CPU/GPU & bộ đệm RAM, tự lặp danh sách video theo đúng tổng thời lượng audio MP3.", 9.5f, Muted);
+        var autoLoopNote = NewLabel("Chế độ Ổn định: nhẹ máy, tiết kiệm RAM • Chế độ NV (Siêu tốc): huy động 80–90% CPU & RAM + Lanczos HQ cho tốc độ & chất lượng tối đa.", 9.5f, Muted);
         autoLoopNote.AutoSize = true;
         autoLoopNote.Padding = new Padding(0, 4, 0, 0);
         table.Controls.Add(autoLoopNote, 0, 3);
+        _tooltip.SetToolTip(_encoder, "H.264 Đa luồng CPU (ổn định): tiết kiệm RAM, không lag máy.\nNVIDIA NVENC GPU (siêu tốc): sử dụng 80–90% CPU & bộ đệm RAM lớn + nội suy Lanczos HQ để render cực nhanh với chất lượng cao nhất.");
         panel.Controls.Add(table);
         _editableControls.AddRange([_folderPath, browse, _resolution, _encoder]);
         return panel;

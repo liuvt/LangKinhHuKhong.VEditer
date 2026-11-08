@@ -14,11 +14,17 @@ public sealed class RenderEngine(FfmpegTools tools)
 {
     private readonly MediaProbe _probe = new(tools);
 
-    private static int GetCpuThreadCount() =>
-        Math.Clamp(Environment.ProcessorCount, 2, 16);
+    private static int GetCpuThreadCount(bool isNvHighPerfMode) => isNvHighPerfMode
+        ? Math.Max(2, (int)Math.Round(Environment.ProcessorCount * 0.88))
+        : Math.Clamp(Environment.ProcessorCount, 2, 16);
 
-    private static int GetFilterThreadCount() =>
-        Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+    private static int GetFilterThreadCount(bool isNvHighPerfMode) => isNvHighPerfMode
+        ? Math.Max(2, (int)Math.Round(Environment.ProcessorCount * 0.85))
+        : Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
+
+    private static string GetMainQueueSize(bool isNvHighPerfMode) => isNvHighPerfMode ? "4096" : "64";
+
+    private static string GetOverlayQueueSize(bool isNvHighPerfMode) => isNvHighPerfMode ? "1024" : "8";
 
     public async Task<string> RenderAsync(
         RenderOptions options,
@@ -41,18 +47,22 @@ public sealed class RenderEngine(FfmpegTools tools)
 
         try
         {
-            var effectiveEncoder = await ResolveEncoderAsync(options.Encoder, cancellationToken, workdir);
+            // Ghi nhận người dùng chọn chế độ NV (Siêu tốc 80–90% CPU & RAM)
+            var isNvHighPerfMode = options.Encoder == VideoEncoder.Nvenc;
+            var (effectiveEncoder, nvencSupportsHqLookahead) = await ResolveEncoderAsync(options.Encoder, cancellationToken, workdir);
             if (options != options with { Encoder = effectiveEncoder })
                 options = options with { Encoder = effectiveEncoder };
 
-            var cpuThreads = GetCpuThreadCount().ToString(CultureInfo.InvariantCulture);
+            var cpuThreads = GetCpuThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+            var filterThreads = GetFilterThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+            var mainQueueSize = GetMainQueueSize(isNvHighPerfMode);
             var joinedAudio = Path.Combine(workdir, "joined_audio.m4a");
             var mp3Count = options.Mp3Files.Count;
             var normalizedAudioDurations = new double[mp3Count];
 
             if (mp3Count == 1)
             {
-                // Chỉ có 1 MP3 => mã hóa thẳng sang joined_audio.m4a chất lượng cao (256kbps, 48kHz Stereo), đa luồng cực nhanh & nhẹ RAM.
+                // Chỉ có 1 MP3 => mã hóa thẳng sang joined_audio.m4a chất lượng cao (256kbps, 48kHz Stereo).
                 var input = options.Mp3Files[0];
                 var seconds = await _probe.GetDurationSecondsAsync(input, cancellationToken);
                 var title = $"Chuẩn hóa âm thanh chất lượng cao: {Path.GetFileName(input)}";
@@ -60,9 +70,9 @@ public sealed class RenderEngine(FfmpegTools tools)
                 var singleAudioArgs = new List<string>
                 {
                     "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                    "-threads", cpuThreads, "-filter_threads", "2",
+                    "-threads", cpuThreads, "-filter_threads", isNvHighPerfMode ? filterThreads : "2",
                     "-stats_period", "1.0", "-progress", "pipe:1",
-                    "-thread_queue_size", "64",
+                    "-thread_queue_size", mainQueueSize,
                     "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn",
                     "-af", "aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo",
                     "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
@@ -71,12 +81,67 @@ public sealed class RenderEngine(FfmpegTools tools)
                 await ProcessRunner.RunAsync(tools.Ffmpeg, singleAudioArgs,
                     line => ReportFfmpegProgress(line, seconds, p =>
                         progress.Report(new RenderProgress(title, 12.0 * p))),
-                    cancellationToken, workdir);
+                    cancellationToken, workdir, isNvHighPerfMode);
                 normalizedAudioDurations[0] = await _probe.GetDurationSecondsAsync(joinedAudio, cancellationToken);
+            }
+            else if (isNvHighPerfMode)
+            {
+                // Chế độ NV (80–90% CPU & RAM): chuẩn hóa SONG SONG đa luồng nhiều file MP3 cùng lúc trong RAM/CPU,
+                // sau đó nối trực tiếp (-c:a copy) thành joined_audio.m4a.
+                Directory.CreateDirectory(audioFolder);
+                var audioClips = new string[mp3Count];
+                var maxParallelAudio = Math.Clamp((int)Math.Round(Environment.ProcessorCount * 0.85 / 2.0), 2, 8);
+                var perWorkerThreads = Math.Max(2, GetCpuThreadCount(true) / maxParallelAudio).ToString(CultureInfo.InvariantCulture);
+                var completedCount = 0;
+
+                await Parallel.ForEachAsync(Enumerable.Range(0, mp3Count),
+                    new ParallelOptions { MaxDegreeOfParallelism = maxParallelAudio, CancellationToken = cancellationToken },
+                    async (i, ct) =>
+                    {
+                        var input = options.Mp3Files[i];
+                        var output = Path.Combine(audioFolder, $"{i + 1:D5}.m4a");
+                        var args = new List<string>
+                        {
+                            "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                            "-threads", perWorkerThreads, "-filter_threads", "2",
+                            "-thread_queue_size", mainQueueSize,
+                            "-i", input, "-map", "0:a:0", "-vn", "-sn", "-dn",
+                            "-af", "aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo",
+                            "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+                            output
+                        };
+                        await ProcessRunner.RunAsync(tools.Ffmpeg, args, null, ct, workdir, highPerformance: true);
+                        audioClips[i] = output;
+                        normalizedAudioDurations[i] = await _probe.GetDurationSecondsAsync(output, ct);
+                        var done = Interlocked.Increment(ref completedCount);
+                        progress.Report(new RenderProgress($"Chuẩn hóa MP3 siêu tốc ({done}/{mp3Count}): {Path.GetFileName(input)}", 10.0 * done / mp3Count));
+                    });
+
+                var estimatedAudioDuration = normalizedAudioDurations.Sum();
+                var audioList = Path.Combine(workdir, "audio.ffconcat");
+                await WriteConcatListAsync(audioList, "audio", audioClips, cancellationToken);
+                const string joinTitle = "Ghép nối liền mạch tất cả MP3 chất lượng cao";
+                progress.Report(new RenderProgress(joinTitle, 10));
+                var joinArgs = new List<string>
+                {
+                    "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                    "-threads", cpuThreads, "-stats_period", "1.0", "-progress", "pipe:1",
+                    "-safe", "0", "-f", "concat", "-i", audioList,
+                    "-map", "0:a:0", "-vn", "-sn", "-dn",
+                    "-c:a", "copy",
+                    "-movflags", "+faststart", joinedAudio
+                };
+                await ProcessRunner.RunAsync(tools.Ffmpeg, joinArgs,
+                    line => ReportFfmpegProgress(line, estimatedAudioDuration, p =>
+                        progress.Report(new RenderProgress(joinTitle, 10.0 + 2.0 * p))),
+                    cancellationToken, workdir, highPerformance: true);
+
+                DeleteDirectorySafe(audioFolder);
+                TryDeleteFile(audioList);
             }
             else
             {
-                // Nhiều MP3: xử lý TUẦN TỰ từng file sang .m4a (AAC 256kbps) để không ngốn RAM,
+                // Chế độ ổn định: xử lý TUẦN TỰ từng file sang .m4a (AAC 256kbps) để không ngốn RAM,
                 // sau đó nối trực tiếp (-c:a copy) thành joined_audio.m4a và xóa ngay file tạm.
                 Directory.CreateDirectory(audioFolder);
                 var audioClips = new string[mp3Count];
@@ -106,7 +171,7 @@ public sealed class RenderEngine(FfmpegTools tools)
                     await ProcessRunner.RunAsync(tools.Ffmpeg, args,
                         line => ReportFfmpegProgress(line, seconds, p =>
                             progress.Report(new RenderProgress(title, basePct + stepPct * p))),
-                        cancellationToken, workdir);
+                        cancellationToken, workdir, highPerformance: false);
                     audioClips[i] = output;
                     normalizedAudioDurations[i] = await _probe.GetDurationSecondsAsync(output, cancellationToken);
                 }
@@ -128,7 +193,7 @@ public sealed class RenderEngine(FfmpegTools tools)
                 await ProcessRunner.RunAsync(tools.Ffmpeg, joinArgs,
                     line => ReportFfmpegProgress(line, estimatedAudioDuration, p =>
                         progress.Report(new RenderProgress(joinTitle, 10.0 + 2.0 * p))),
-                    cancellationToken, workdir);
+                    cancellationToken, workdir, highPerformance: false);
 
                 // Giải phóng ngay toàn bộ file âm thanh tạm trước khi sang bước xử lý video
                 DeleteDirectorySafe(audioFolder);
@@ -165,7 +230,7 @@ public sealed class RenderEngine(FfmpegTools tools)
                         "-vf", $"scale={maxW}:{maxH}:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba",
                         "-frames:v", "1", "-update", "1", scaledBmp
                     };
-                    await ProcessRunner.RunAsync(tools.Ffmpeg, prepArgs, null, cancellationToken, workdir);
+                    await ProcessRunner.RunAsync(tools.Ffmpeg, prepArgs, null, cancellationToken, workdir, isNvHighPerfMode);
                     preparedOverlays.Add(ov with { ImagePath = scaledBmp });
                 }
                 options = options with { Overlays = preparedOverlays };
@@ -203,8 +268,8 @@ public sealed class RenderEngine(FfmpegTools tools)
             }
             else
             {
-                // Step 3: Chuẩn hóa TUẦN TỰ từng video (1 tiến trình duy nhất tại mỗi thời điểm để bảo vệ RAM & tránh lag),
-                // đồng thời gộp luôn 0–4 ảnh góc vào clip chuẩn hóa để Bước 4 sao chép trực tiếp (-c:v copy) hoặc chèn phụ đề.
+                // Step 3: Chuẩn hóa từng video, gộp luôn 0–4 ảnh góc vào clip chuẩn hóa
+                // để Bước 4 sao chép trực tiếp (-c:v copy) hoặc chèn phụ đề.
                 Directory.CreateDirectory(clipsFolder);
                 var videoCount = options.Videos.Count;
                 var videoClips = new List<string>(videoCount);
@@ -215,38 +280,91 @@ public sealed class RenderEngine(FfmpegTools tools)
                 var normStartPct = 12.0;
                 var normSpanPct = hasBurnInSubtitles ? 43.0 : 78.0;
 
-                for (var i = 0; i < videoCount; i++)
+                if (isNvHighPerfMode && videoCount > 1)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    // Nếu tổng thời lượng các clip đã chuẩn hóa đủ phủ hết thời lượng audio thì dừng ngay, không xử lý thừa
-                    if (accumulatedDuration >= audioDuration && videoClips.Count > 0)
-                        break;
+                    // Chế độ NV (80–90% CPU & RAM): tính trước danh sách các clip cần dùng theo thời lượng audio
+                    // và chạy chuẩn hóa song song 2 luồng video đồng thời để khai thác tối đa 80–90% CPU/RAM & bộ mã hóa NVENC.
+                    var plannedJobs = new List<(int Index, VideoClipOption Video, double ExpectedDuration, string ClipFile)>();
+                    for (var i = 0; i < videoCount; i++)
+                    {
+                        if (accumulatedDuration >= audioDuration && plannedJobs.Count > 0)
+                            break;
+                        var video = options.Videos[i];
+                        var sourceDuration = await _probe.GetDurationSecondsAsync(video.FilePath, cancellationToken);
+                        var rawExpectedDuration = sourceDuration / video.PlaybackSpeed;
+                        var remainingNeeded = Math.Max(0.5, audioDuration - accumulatedDuration);
+                        var expectedDuration = Math.Min(rawExpectedDuration, remainingNeeded);
+                        var clipFile = Path.Combine(clipsFolder, $"{i + 1:D5}.mp4");
+                        plannedJobs.Add((i, video, expectedDuration, clipFile));
+                        accumulatedDuration += expectedDuration;
+                    }
 
-                    var video = options.Videos[i];
-                    var sourceDuration = await _probe.GetDurationSecondsAsync(video.FilePath, cancellationToken);
-                    var rawExpectedDuration = sourceDuration / video.PlaybackSpeed;
-                    var remainingNeeded = Math.Max(0.5, audioDuration - accumulatedDuration);
-                    var expectedDuration = Math.Min(rawExpectedDuration, remainingNeeded);
+                    var jobCount = plannedJobs.Count;
+                    var actualDurations = new double[jobCount];
+                    var completedJobs = 0;
 
-                    var clipFile = Path.Combine(clipsFolder, $"{i + 1:D5}.mp4");
-                    var title = $"Chuẩn hóa video tốc độ cao {i + 1}/{videoCount} ({PlaybackSpeeds.Format(video.PlaybackSpeed)}): {Path.GetFileName(video.FilePath)}";
-                    var basePct = normStartPct + normSpanPct * i / videoCount;
-                    var stepPct = normSpanPct / videoCount;
-                    progress.Report(new RenderProgress(title, basePct));
+                    await Parallel.ForEachAsync(Enumerable.Range(0, jobCount),
+                        new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = cancellationToken },
+                        async (jobIdx, ct) =>
+                        {
+                            var job = plannedJobs[jobIdx];
+                            var title = $"Chuẩn hóa NV siêu tốc {jobIdx + 1}/{jobCount} ({PlaybackSpeeds.Format(job.Video.PlaybackSpeed)}): {Path.GetFileName(job.Video.FilePath)}";
+                            var hasAudio = !options.MuteVideoAudio &&
+                                await _probe.HasAudioStreamAsync(job.Video.FilePath, ct);
+                            var args = BuildNormalizeArguments(options, job.Video, job.Video.FilePath,
+                                job.ClipFile, job.ExpectedDuration, hasAudio, isNvHighPerfMode: true, nvencSupportsHqLookahead);
+                            await ProcessRunner.RunAsync(tools.Ffmpeg, args,
+                                line => ReportFfmpegProgress(line, job.ExpectedDuration, p =>
+                                {
+                                    var pct = normStartPct + normSpanPct * ((completedJobs + p) / Math.Max(1, jobCount));
+                                    progress.Report(new RenderProgress(title, Math.Clamp(pct, normStartPct, normStartPct + normSpanPct)));
+                                }),
+                                ct, workdir, highPerformance: true);
+                            actualDurations[jobIdx] = await _probe.GetDurationSecondsAsync(job.ClipFile, ct);
+                            Interlocked.Increment(ref completedJobs);
+                        });
 
-                    var hasAudio = !options.MuteVideoAudio &&
-                        await _probe.HasAudioStreamAsync(video.FilePath, cancellationToken);
-                    var args = BuildNormalizeArguments(options, video, video.FilePath,
-                        clipFile, expectedDuration, hasAudio);
-                    await ProcessRunner.RunAsync(tools.Ffmpeg, args,
-                        line => ReportFfmpegProgress(line, expectedDuration, p =>
-                            progress.Report(new RenderProgress(title, basePct + stepPct * p))),
-                        cancellationToken, workdir);
+                    for (var idx = 0; idx < jobCount; idx++)
+                    {
+                        videoClips.Add(plannedJobs[idx].ClipFile);
+                        clipDurations.Add(actualDurations[idx]);
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < videoCount; i++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // Nếu tổng thời lượng các clip đã chuẩn hóa đủ phủ hết thời lượng audio thì dừng ngay, không xử lý thừa
+                        if (accumulatedDuration >= audioDuration && videoClips.Count > 0)
+                            break;
 
-                    var actualClipDuration = await _probe.GetDurationSecondsAsync(clipFile, cancellationToken);
-                    clipDurations.Add(actualClipDuration);
-                    videoClips.Add(clipFile);
-                    accumulatedDuration += actualClipDuration;
+                        var video = options.Videos[i];
+                        var sourceDuration = await _probe.GetDurationSecondsAsync(video.FilePath, cancellationToken);
+                        var rawExpectedDuration = sourceDuration / video.PlaybackSpeed;
+                        var remainingNeeded = Math.Max(0.5, audioDuration - accumulatedDuration);
+                        var expectedDuration = Math.Min(rawExpectedDuration, remainingNeeded);
+
+                        var clipFile = Path.Combine(clipsFolder, $"{i + 1:D5}.mp4");
+                        var title = $"Chuẩn hóa video tốc độ cao {i + 1}/{videoCount} ({PlaybackSpeeds.Format(video.PlaybackSpeed)}): {Path.GetFileName(video.FilePath)}";
+                        var basePct = normStartPct + normSpanPct * i / videoCount;
+                        var stepPct = normSpanPct / videoCount;
+                        progress.Report(new RenderProgress(title, basePct));
+
+                        var hasAudio = !options.MuteVideoAudio &&
+                            await _probe.HasAudioStreamAsync(video.FilePath, cancellationToken);
+                        var args = BuildNormalizeArguments(options, video, video.FilePath,
+                            clipFile, expectedDuration, hasAudio, isNvHighPerfMode, nvencSupportsHqLookahead);
+                        await ProcessRunner.RunAsync(tools.Ffmpeg, args,
+                            line => ReportFfmpegProgress(line, expectedDuration, p =>
+                                progress.Report(new RenderProgress(title, basePct + stepPct * p))),
+                            cancellationToken, workdir, isNvHighPerfMode);
+
+                        var actualClipDuration = await _probe.GetDurationSecondsAsync(clipFile, cancellationToken);
+                        clipDurations.Add(actualClipDuration);
+                        videoClips.Add(clipFile);
+                        accumulatedDuration += actualClipDuration;
+                    }
                 }
 
                 playlistDuration = clipDurations.Sum();
@@ -264,11 +382,11 @@ public sealed class RenderEngine(FfmpegTools tools)
             var outputFile = GetUniqueOutputFile(fullOutputDir, "LangKinhHuKhong_Full", options.ResolutionName,
                 options.Subtitles is { SrtFiles.Count: > 0, SaveSidecarSrt: true });
             var temporaryOutput = Path.Combine(workdir, "final_render.mp4");
-            var finalArgs = BuildOutputArguments(options, videoList, joinedAudio, temporaryOutput, audioDuration, singlePassSpeed);
+            var finalArgs = BuildOutputArguments(options, videoList, joinedAudio, temporaryOutput, audioDuration, singlePassSpeed, isNvHighPerfMode, nvencSupportsHqLookahead);
             await ProcessRunner.RunAsync(tools.Ffmpeg, finalArgs,
                 line => ReportFfmpegProgress(line, audioDuration, p =>
                     progress.Report(new RenderProgress(finalTitle, finalStartPct + finalSpanPct * p))),
-                cancellationToken, workdir);
+                cancellationToken, workdir, isNvHighPerfMode);
 
             // A failed/canceled job must not leave a partial MP4 in output folder.
             cancellationToken.ThrowIfCancellationRequested();
@@ -374,26 +492,34 @@ public sealed class RenderEngine(FfmpegTools tools)
             if (!File.Exists(input)) throw new FileNotFoundException("Không tìm thấy tệp: " + input, input);
     }
 
-    private static string BuildNormalizeFilter(RenderOptions settings, double playbackSpeed) =>
-        $"setpts=(PTS-STARTPTS)/{playbackSpeed.ToString("0.##", CultureInfo.InvariantCulture)}," +
-        $"fps={settings.FrameRate}," +
-        $"scale={settings.Width}:{settings.Height}:force_original_aspect_ratio=decrease:flags=fast_bilinear," +
-        $"pad={settings.Width}:{settings.Height}:(ow-iw)/2:(oh-ih)/2," +
-        "setsar=1,format=yuv420p";
+    private static string BuildNormalizeFilter(RenderOptions settings, double playbackSpeed, bool isNvHighPerfMode)
+    {
+        // Ở chế độ NV (80–90% CPU & RAM): dùng bộ lọc nội suy cao cấp lanczos+accurate_rnd+full_chroma_int để đảm bảo độ nét hình ảnh tối đa.
+        var scaleFlags = isNvHighPerfMode
+            ? "lanczos+accurate_rnd+full_chroma_int"
+            : "fast_bilinear";
+        return $"setpts=(PTS-STARTPTS)/{playbackSpeed.ToString("0.##", CultureInfo.InvariantCulture)}," +
+               $"fps={settings.FrameRate}," +
+               $"scale={settings.Width}:{settings.Height}:force_original_aspect_ratio=decrease:flags={scaleFlags}," +
+               $"pad={settings.Width}:{settings.Height}:(ow-iw)/2:(oh-ih)/2," +
+               "setsar=1,format=yuv420p";
+    }
 
     private static List<string> BuildNormalizeArguments(
         RenderOptions settings, VideoClipOption video, string sourceFile, string clipFile,
-        double expectedDuration, bool hasSourceAudio)
+        double expectedDuration, bool hasSourceAudio, bool isNvHighPerfMode = false, bool nvencSupportsHqLookahead = false)
     {
-        var cpuThreads = GetCpuThreadCount().ToString(CultureInfo.InvariantCulture);
-        var filterThreads = GetFilterThreadCount().ToString(CultureInfo.InvariantCulture);
+        var cpuThreads = GetCpuThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+        var filterThreads = GetFilterThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+        var mainQueueSize = GetMainQueueSize(isNvHighPerfMode);
+        var overlayQueueSize = GetOverlayQueueSize(isNvHighPerfMode);
         var duration = expectedDuration.ToString("F6", CultureInfo.InvariantCulture);
         var args = new List<string>
         {
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
             "-threads", cpuThreads, "-filter_threads", filterThreads, "-filter_complex_threads", filterThreads,
             "-stats_period", "1.0", "-progress", "pipe:1",
-            "-thread_queue_size", "64", "-i", sourceFile
+            "-thread_queue_size", mainQueueSize, "-i", sourceFile
         };
         if (!settings.MuteVideoAudio && !hasSourceAudio)
             args.AddRange(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]);
@@ -405,10 +531,10 @@ public sealed class RenderEngine(FfmpegTools tools)
             // Dùng -loop 1 -framerate <fps> trên ảnh góc .BMP đã pre-scale:
             // Đọc ảnh .BMP không tốn CPU giải nén zlib, đồng thời khi video nguồn tự đổi độ phân giải giữa chừng,
             // FFmpeg reconfigure filtergraph vẫn nhận được frame liên tục giúp 4 ảnh góc kéo dài xuyên suốt đến hết clip!
-            args.AddRange(["-thread_queue_size", "8", "-loop", "1", "-framerate", fpsText, "-i", overlay.ImagePath]);
+            args.AddRange(["-thread_queue_size", overlayQueueSize, "-loop", "1", "-framerate", fpsText, "-i", overlay.ImagePath]);
         }
 
-        var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed) +
+        var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed, isNvHighPerfMode) +
             $",trim=duration={duration},setpts=PTS-STARTPTS";
 
         if (settings.MuteVideoAudio && settings.Overlays.Count == 0)
@@ -436,12 +562,14 @@ public sealed class RenderEngine(FfmpegTools tools)
                 args.AddRange(["-map", "[anorm]"]);
         }
 
-        AppendVideoEncoderArguments(args, settings, cpuThreads);
+        AppendVideoEncoderArguments(args, settings, cpuThreads, isNvHighPerfMode, nvencSupportsHqLookahead);
 
         args.AddRange([
             "-pix_fmt", "yuv420p", "-r", settings.FrameRate.ToString(CultureInfo.InvariantCulture),
             "-video_track_timescale", "30000"
         ]);
+        if (isNvHighPerfMode)
+            args.AddRange(["-max_muxing_queue_size", "4096"]);
         if (!settings.MuteVideoAudio)
             args.AddRange(["-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2"]);
         args.AddRange(["-t", duration, "-movflags", "+faststart", clipFile]);
@@ -450,10 +578,12 @@ public sealed class RenderEngine(FfmpegTools tools)
 
     private static List<string> BuildOutputArguments(
         RenderOptions settings, string videoListPath, string joinedAudio, string outputFile,
-        double audioDuration, double? singlePassSpeed = null)
+        double audioDuration, double? singlePassSpeed = null, bool isNvHighPerfMode = false, bool nvencSupportsHqLookahead = false)
     {
-        var cpuThreads = GetCpuThreadCount().ToString(CultureInfo.InvariantCulture);
-        var filterThreads = GetFilterThreadCount().ToString(CultureInfo.InvariantCulture);
+        var cpuThreads = GetCpuThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+        var filterThreads = GetFilterThreadCount(isNvHighPerfMode).ToString(CultureInfo.InvariantCulture);
+        var mainQueueSize = GetMainQueueSize(isNvHighPerfMode);
+        var overlayQueueSize = GetOverlayQueueSize(isNvHighPerfMode);
         var hasBurnInSubtitles = settings.Subtitles is { SrtFiles.Count: > 0, BurnIntoVideo: true };
 
         var args = new List<string>
@@ -461,10 +591,10 @@ public sealed class RenderEngine(FfmpegTools tools)
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
             "-threads", cpuThreads, "-filter_threads", filterThreads, "-filter_complex_threads", filterThreads,
             "-stats_period", "1.0", "-progress", "pipe:1",
-            "-thread_queue_size", "64",
+            "-thread_queue_size", mainQueueSize,
             "-stream_loop", "-1", // lặp danh sách clip theo đúng tổng thời lượng audio
             "-safe", "0", "-f", "concat", "-i", videoListPath,
-            "-thread_queue_size", "64", "-i", joinedAudio
+            "-thread_queue_size", mainQueueSize, "-i", joinedAudio
         };
 
         if (singlePassSpeed is double directSpeed)
@@ -472,11 +602,11 @@ public sealed class RenderEngine(FfmpegTools tools)
             // Chế độ Single-Pass trực tiếp: nạp 0–4 ảnh góc .BMP + chuẩn hóa + vẽ phụ đề SRT trong 1 lần duy nhất
             var fpsText = settings.FrameRate.ToString(CultureInfo.InvariantCulture);
             foreach (var overlay in settings.Overlays)
-                args.AddRange(["-thread_queue_size", "8", "-loop", "1", "-framerate", fpsText, "-i", overlay.ImagePath]);
+                args.AddRange(["-thread_queue_size", overlayQueueSize, "-loop", "1", "-framerate", fpsText, "-i", overlay.ImagePath]);
 
             var filters = new List<string>
             {
-                $"[0:v]{BuildNormalizeFilter(settings, directSpeed)}[v0]"
+                $"[0:v]{BuildNormalizeFilter(settings, directSpeed, isNvHighPerfMode)}[v0]"
             };
             AppendOverlayStages(filters, settings, startInputIndex: 2);
             var escapedSub = SubtitleComposer.BuildBurnInFilter(settings.Subtitles!);
@@ -487,7 +617,7 @@ public sealed class RenderEngine(FfmpegTools tools)
                 "-map", "[vout]",
                 "-map", "1:a:0"
             ]);
-            AppendVideoEncoderArguments(args, settings, cpuThreads);
+            AppendVideoEncoderArguments(args, settings, cpuThreads, isNvHighPerfMode, nvencSupportsHqLookahead);
             args.AddRange([
                 "-c:a", "copy",
                 "-pix_fmt", "yuv420p", "-r", fpsText
@@ -531,7 +661,7 @@ public sealed class RenderEngine(FfmpegTools tools)
                 "-map", settings.MuteVideoAudio ? "1:a:0" : "[aout]"
             ]);
 
-            AppendVideoEncoderArguments(args, settings, cpuThreads);
+            AppendVideoEncoderArguments(args, settings, cpuThreads, isNvHighPerfMode, nvencSupportsHqLookahead);
 
             if (settings.MuteVideoAudio)
                 args.AddRange(["-c:a", "copy"]);
@@ -541,6 +671,9 @@ public sealed class RenderEngine(FfmpegTools tools)
             args.AddRange(["-pix_fmt", "yuv420p", "-r", settings.FrameRate.ToString(CultureInfo.InvariantCulture)]);
         }
 
+        if (isNvHighPerfMode)
+            args.AddRange(["-max_muxing_queue_size", "4096"]);
+
         args.AddRange([
             "-t", audioDuration.ToString("F6", CultureInfo.InvariantCulture),
             "-map_metadata", "-1", "-map_chapters", "-1",
@@ -549,17 +682,55 @@ public sealed class RenderEngine(FfmpegTools tools)
         return args;
     }
 
-    private static void AppendVideoEncoderArguments(List<string> args, RenderOptions settings, string cpuThreads)
+    private static void AppendVideoEncoderArguments(
+        List<string> args, RenderOptions settings, string cpuThreads,
+        bool isNvHighPerfMode = false, bool nvencSupportsHqLookahead = false)
     {
-        // Chế độ H.264 Đa luồng CPU (ổn định):
-        // Dùng preset ultrafast + CRF 18 (chất lượng hình ảnh rất cao, sắc nét) kết hợp rc_lookahead=0:sync_lookahead=0:ref=1:bframes=0
-        // giúp tốc độ render tăng gấp 6–7 lần (video 8 tiếng render chỉ còn vài giờ thay vì >24 giờ) và tốn cực ít RAM (~150MB).
         if (settings.Encoder == VideoEncoder.Nvenc)
         {
-            args.AddRange(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "19", "-b:v", "0"]);
+            if (nvencSupportsHqLookahead)
+            {
+                // Chế độ NV (80–90% CPU & RAM + GPU NVENC HQ):
+                // Bật VBR CQ 18 sắc nét cao + Spatial/Temporal AQ + bộ đệm Lookahead 32 frames & 64 surfaces trong RAM/VRAM.
+                args.AddRange([
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p5",
+                    "-tune", "hq",
+                    "-rc", "vbr",
+                    "-cq", "18",
+                    "-b:v", "0",
+                    "-spatial-aq", "1",
+                    "-temporal-aq", "1",
+                    "-aq-strength", "8",
+                    "-rc-lookahead", "32",
+                    "-surfaces", "64",
+                    "-bf", "3",
+                    "-profile:v", "high"
+                ]);
+            }
+            else
+            {
+                args.AddRange([
+                    "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "18", "-b:v", "0", "-profile:v", "high"
+                ]);
+            }
+        }
+        else if (isNvHighPerfMode)
+        {
+            // Trường hợp người dùng chọn chế độ NV (80–90% CPU & RAM) nhưng máy không có GPU NVIDIA rời:
+            // Huy động 88% nhân CPU + bộ đệm RAM Lookahead lớn (rc_lookahead=40, sync_lookahead=32, ref=3, bframes=3, CRF 17)
+            // để vừa đẩy tốc độ đa nhân tối đa vừa đảm bảo chất lượng hình ảnh cực kỳ sắc nét.
+            var lookaheadThreads = Math.Clamp(GetCpuThreadCount(true) / 3, 2, 8).ToString(CultureInfo.InvariantCulture);
+            args.AddRange([
+                "-c:v", "libx264", "-preset", "superfast", "-crf", "17", "-profile:v", "high",
+                "-x264-params", $"threads={cpuThreads}:lookahead_threads={lookaheadThreads}:rc_lookahead=40:sync_lookahead=32:ref=3:bframes=3:aq-mode=2"
+            ]);
         }
         else
         {
+            // Chế độ H.264 Đa luồng CPU (ổn định):
+            // Dùng preset ultrafast + CRF 18 kết hợp rc_lookahead=0:sync_lookahead=0:ref=1:bframes=0
+            // giúp tốc độ render nhanh gấp 6–7 lần và tốn cực ít RAM (~150MB), không gây lag máy.
             args.AddRange([
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-profile:v", "high",
                 "-x264-params", $"threads={cpuThreads}:lookahead_threads=1:rc_lookahead=0:sync_lookahead=0:ref=1:bframes=0"
@@ -592,23 +763,43 @@ public sealed class RenderEngine(FfmpegTools tools)
         }
     }
 
-    private async Task<VideoEncoder> ResolveEncoderAsync(VideoEncoder requested, CancellationToken cancellationToken, string workdir)
+    private async Task<(VideoEncoder Encoder, bool SupportsHqLookahead)> ResolveEncoderAsync(
+        VideoEncoder requested, CancellationToken cancellationToken, string workdir)
     {
-        if (requested != VideoEncoder.Nvenc) return VideoEncoder.X264;
+        if (requested != VideoEncoder.Nvenc) return (VideoEncoder.X264, false);
         try
         {
-            var probeArgs = new[]
+            var hqProbeArgs = new[]
+            {
+                "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=30:d=0.1",
+                "-frames:v", "1",
+                "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "18",
+                "-spatial-aq", "1", "-temporal-aq", "1", "-rc-lookahead", "32", "-surfaces", "64", "-bf", "3",
+                "-f", "null", "-"
+            };
+            await ProcessRunner.RunAsync(tools.Ffmpeg, hqProbeArgs, null, cancellationToken, workdir, highPerformance: true);
+            return (VideoEncoder.Nvenc, true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Thử lại cấu hình NVENC cơ bản nếu driver/GPU đời cũ không hỗ trợ đủ cờ nâng cao
+        }
+
+        try
+        {
+            var basicProbeArgs = new[]
             {
                 "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=0.1",
                 "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"
             };
-            await ProcessRunner.RunAsync(tools.Ffmpeg, probeArgs, null, cancellationToken, workdir);
-            return VideoEncoder.Nvenc;
+            await ProcessRunner.RunAsync(tools.Ffmpeg, basicProbeArgs, null, cancellationToken, workdir, highPerformance: true);
+            return (VideoEncoder.Nvenc, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return VideoEncoder.X264;
+            return (VideoEncoder.X264, false);
         }
     }
 
