@@ -44,4 +44,24 @@ public sealed class MediaProbe(FfmpegTools tools)
         return output.Trim().ToLowerInvariant();
     }
 
+    public async Task<(string Codec, int Width, int Height)> GetVideoStreamInfoAsync(string file, CancellationToken cancellationToken)
+    {
+        var args = new[]
+        {
+            "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height",
+            "-of", "csv=p=0", file
+        };
+        var output = await ProcessRunner.RunAsync(tools.Ffprobe, args, null, cancellationToken);
+        var line = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
+        var parts = line.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length >= 3 &&
+            int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var w) &&
+            int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var h) &&
+            w > 0 && h > 0)
+        {
+            return (parts[0].ToLowerInvariant(), w, h);
+        }
+        return (parts.FirstOrDefault()?.ToLowerInvariant() ?? "", 0, 0);
+    }
+
 }
