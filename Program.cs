@@ -11,11 +11,23 @@ internal static class Program
     private static extern bool SetDllDirectory(string lpPathName);
 
     [STAThread]
-    private static void Main()
+    private static int Main(string[] args)
     {
         ConfigureRuntimeDirectory();
+        if (args.Length >= 2 && string.Equals(args[0], "--generate-srt", StringComparison.OrdinalIgnoreCase))
+        {
+            var input = Path.GetFullPath(args[1]);
+            var output = args.Length >= 3 ? Path.GetFullPath(args[2]) : Path.ChangeExtension(input, ".srt");
+            var lang = args.Length >= 4 ? args[3] : "vi-VN";
+            var tools = Core.FfmpegLocator.Find();
+            var gen = new Core.SrtGenerator(tools);
+            var res = gen.GenerateAsync(new Core.SrtGenerationOptions(input, output, Core.SrtGenerationMode.SpeechToTextAuto, lang), null, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            return res.Cues.Count > 0 ? 0 : 1;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
+        return 0;
     }
 
     private static void ConfigureRuntimeDirectory()

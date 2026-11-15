@@ -123,8 +123,15 @@ public static partial class SubtitleComposer
             result.AppendLine((i + 1).ToString(CultureInfo.InvariantCulture));
             result.Append(FormatTime(cues[i].Start)).Append(" --> ")
                 .AppendLine(FormatTime(cues[i].End));
-            result.AppendLine(cues[i].Text.Replace("\r", ""));
+            var normalizedText = cues[i].Text.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", Environment.NewLine);
+            result.AppendLine(normalizedText);
             result.AppendLine();
+        }
+        var dir = Path.GetDirectoryName(Path.GetFullPath(destination));
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        if (File.Exists(destination))
+        {
+            try { File.SetAttributes(destination, FileAttributes.Normal); } catch { }
         }
         await File.WriteAllTextAsync(destination, result.ToString(), Utf8NoBom, token);
     }

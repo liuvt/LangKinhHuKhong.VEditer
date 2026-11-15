@@ -506,12 +506,14 @@ public sealed class RenderEngine(FfmpegTools tools)
     {
         // Dùng fast_bilinear (tối ưu SIMD AVX2 đa nhân trong swscale) giúp tăng tốc độ scale lên gấp 3–4 lần
         // mà không gây nghẽn cổ chai đơn luồng như lanczos+accurate_rnd+full_chroma_int.
+        // Đặt scale+pad trước setpts và dùng PTS/{speed} (không trừ STARTPTS) để khi video gốc đổi độ phân giải
+        // giữa chừng (mid-stream resolution change) và FFmpeg re-init filtergraph, mốc PTS luôn liên tục, không bị drop frame.
         const string scaleFlags = "fast_bilinear";
-        return $"setpts=(PTS-STARTPTS)/{playbackSpeed.ToString("0.##", CultureInfo.InvariantCulture)}," +
-               $"fps={settings.FrameRate}," +
-               $"scale={settings.Width}:{settings.Height}:force_original_aspect_ratio=decrease:flags={scaleFlags}," +
+        return $"scale={settings.Width}:{settings.Height}:force_original_aspect_ratio=decrease:flags={scaleFlags}," +
                $"pad={settings.Width}:{settings.Height}:(ow-iw)/2:(oh-ih)/2," +
-               "setsar=1,format=yuv420p";
+               "setsar=1,format=yuv420p," +
+               $"setpts=PTS/{playbackSpeed.ToString("0.##", CultureInfo.InvariantCulture)}," +
+               $"fps={settings.FrameRate}";
     }
 
     private static List<string> BuildNormalizeArguments(
@@ -528,7 +530,6 @@ public sealed class RenderEngine(FfmpegTools tools)
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
             "-threads", cpuThreads, "-filter_threads", filterThreads, "-filter_complex_threads", filterThreads,
             "-stats_period", "1.0", "-progress", "pipe:1",
-            "-reinit_filter", "0",
             "-thread_queue_size", mainQueueSize, "-i", sourceFile
         };
         if (!settings.MuteVideoAudio && !hasSourceAudio)
@@ -537,13 +538,13 @@ public sealed class RenderEngine(FfmpegTools tools)
         var overlayStartInputIndex = (!settings.MuteVideoAudio && !hasSourceAudio) ? 2 : 1;
         foreach (var overlay in settings.Overlays)
         {
-            // Nạp 1 frame ảnh góc .BMP (đã pre-scale sẵn bằng Lanczos) vào bộ nhớ RAM và giữ bằng eof_action=repeat:
-            // Tuyệt đối không dùng -loop 1 để tránh đọc lại ổ đĩa hàng chục triệu lần (tiết kiệm >800 GB Disk I/O).
-            args.AddRange(["-thread_queue_size", overlayQueueSize, "-i", overlay.ImagePath]);
+            // Dùng -loop 1 -framerate 2 cho ảnh góc .BMP đã pre-scale:
+            // Giảm 93% I/O so với 30fps (chỉ nạp từ page cache RAM) nhưng đảm bảo luồng overlay luôn sống
+            // ngay cả khi video nguồn tự đổi độ phân giải giữa chừng làm FFmpeg khởi tạo lại filtergraph.
+            args.AddRange(["-loop", "1", "-framerate", "2", "-thread_queue_size", overlayQueueSize, "-i", overlay.ImagePath]);
         }
 
-        var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed, isNvHighPerfMode) +
-            $",trim=duration={duration},setpts=PTS-STARTPTS";
+        var baseVideoFilter = BuildNormalizeFilter(settings, video.PlaybackSpeed, isNvHighPerfMode);
 
         if (settings.MuteVideoAudio && settings.Overlays.Count == 0)
         {
@@ -599,7 +600,6 @@ public sealed class RenderEngine(FfmpegTools tools)
             "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
             "-threads", cpuThreads, "-filter_threads", filterThreads, "-filter_complex_threads", filterThreads,
             "-stats_period", "1.0", "-progress", "pipe:1",
-            "-reinit_filter", "0",
             "-thread_queue_size", mainQueueSize,
             "-stream_loop", "-1", // lặp danh sách clip theo đúng tổng thời lượng audio
             "-safe", "0", "-f", "concat", "-i", videoListPath,
@@ -608,10 +608,11 @@ public sealed class RenderEngine(FfmpegTools tools)
 
         if (singlePassSpeed is double directSpeed)
         {
-            // Chế độ Single-Pass trực tiếp: nạp 0–4 ảnh góc .BMP (1 frame trong RAM) + chuẩn hóa + vẽ phụ đề SRT trong 1 lần duy nhất
+            // Chế độ Single-Pass trực tiếp: nạp 0–4 ảnh góc .BMP + chuẩn hóa + vẽ phụ đề SRT trong 1 lần duy nhất.
+            // Không dùng -reinit_filter 0 để tránh lỗi 0xC0000005 (-1073741819) khi video nguồn tự đổi độ phân giải giữa chừng.
             var fpsText = settings.FrameRate.ToString(CultureInfo.InvariantCulture);
             foreach (var overlay in settings.Overlays)
-                args.AddRange(["-thread_queue_size", overlayQueueSize, "-i", overlay.ImagePath]);
+                args.AddRange(["-loop", "1", "-framerate", "2", "-thread_queue_size", overlayQueueSize, "-i", overlay.ImagePath]);
 
             var filters = new List<string>
             {

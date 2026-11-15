@@ -405,6 +405,22 @@ public sealed class MainForm : Form
                   "• Luồng 2: Chọn 1 file Video ➔ Tự tách MP3 ➔ Xuất 1 file .SRT khớp thời gian thực.\n\n" +
                   "• Có thể sửa trực tiếp phụ đề và đẩy sang màn hình Render Video.";
         }
+
+        // Nếu chuyển sang tab Create .SRT mà chưa chọn tệp đầu vào, tự động gợi ý tệp MP3/Video đang chọn ở màn hình Render
+        if (!isRenderScreen && string.IsNullOrWhiteSpace(_genSrtInputPath.Text))
+        {
+            var selectedMp3 = (_mp3s.SelectedItem as MediaFile) ?? (_mp3s.Items.Count > 0 ? (MediaFile)_mp3s.Items[0] : null);
+            if (selectedMp3 is not null && File.Exists(selectedMp3.FullPath))
+            {
+                SetStandaloneSrtInputFile(selectedMp3.FullPath);
+            }
+            else
+            {
+                var selectedVid = (_videos.SelectedItem as MediaFile) ?? (_videos.Items.Count > 0 ? (MediaFile)_videos.Items[0] : null);
+                if (selectedVid is not null && File.Exists(selectedVid.FullPath))
+                    SetStandaloneSrtInputFile(selectedVid.FullPath);
+            }
+        }
     }
 
     /// <summary>
@@ -457,8 +473,14 @@ public sealed class MainForm : Form
         inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
         inputRow.Controls.Add(NewLabel("Tệp nguồn (MP3/Video):", 10f, Muted), 0, 0);
         _genSrtInputPath.Dock = DockStyle.Fill;
-        _genSrtInputPath.ReadOnly = true;
-        _genSrtInputPath.PlaceholderText = "Kéo thả hoặc bấm nút bên phải để chọn 1 file .mp3, .wav, .mp4, .mkv, .mov...";
+        _genSrtInputPath.ReadOnly = false;
+        _genSrtInputPath.PlaceholderText = "Kéo thả, dán đường dẫn hoặc bấm nút bên phải để chọn 1 file .mp3, .wav, .mp4, .mkv, .mov...";
+        _genSrtInputPath.Leave += (_, _) =>
+        {
+            var candidate = _genSrtInputPath.Text.Trim().Trim('"');
+            if (File.Exists(candidate) && string.IsNullOrWhiteSpace(_genSrtOutputPath.Text))
+                SetStandaloneSrtInputFile(candidate);
+        };
         inputRow.Controls.Add(_genSrtInputPath, 1, 0);
         var pickInputBtn = NewButton("CHỌN MP3 / VIDEO", true);
         pickInputBtn.Dock = DockStyle.Fill;
@@ -703,7 +725,8 @@ public sealed class MainForm : Form
 
             if (!IsDisposed)
             {
-                _genSrtScriptBox.Text = await File.ReadAllTextAsync(result.SrtFilePath);
+                var rawSrt = await File.ReadAllTextAsync(result.SrtFilePath);
+                _genSrtScriptBox.Text = rawSrt.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", Environment.NewLine);
                 _genSrtSaveEditsBtn.Enabled = true;
                 _genSrtPushToRenderBtn.Enabled = true;
                 _genSrtOpenFileBtn.Enabled = true;
