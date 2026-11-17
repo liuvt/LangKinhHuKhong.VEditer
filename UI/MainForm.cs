@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Text.Json;
 using LangKinhHuKhong.Editer.Core;
 
 namespace LangKinhHuKhong.Editer.UI;
@@ -70,6 +71,7 @@ public sealed class MainForm : Form
     private readonly PictureBox _layoutPreview = NewPreview();
     private readonly OverlaySlot[] _overlaySlots;
     private readonly TextBox _folderPath = NewTextBox();
+    private readonly Label _diskFreeLabel = NewInlineLabel("", leftMargin: 16);
     private readonly ComboBox _resolution = NewCombo();
     private readonly ComboBox _encoder = NewCombo();
     private readonly CheckBox _muteSourceAudio = new();
@@ -86,6 +88,7 @@ public sealed class MainForm : Form
     private CancellationTokenSource? _cts;
     private bool _rendering;
     private bool _closeAfterCancel;
+    private bool _suppressPrefSave;
     private string _previousStage = "";
 
     public MainForm()
@@ -110,8 +113,8 @@ public sealed class MainForm : Form
 
         BuildInterface();
         WireEvents();
-        _folderPath.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
-            "LangKinhHuKhong.Output");
+        LoadUserPreferences();
+        UpdateDiskFreeBadge();
         CheckFfmpeg();
     }
 
@@ -1521,13 +1524,14 @@ public sealed class MainForm : Form
         optionsRow.Controls.Add(_resolution);
         optionsRow.Controls.Add(NewInlineLabel("Bộ mã hóa:"));
         optionsRow.Controls.Add(_encoder);
+        optionsRow.Controls.Add(_diskFreeLabel);
         table.Controls.Add(optionsRow, 0, 2);
 
-        var autoLoopNote = NewLabel("Chế độ Ổn định: nhẹ máy, tiết kiệm RAM • Chế độ NV (Siêu tốc): huy động 80–90% CPU & RAM + Lanczos HQ cho tốc độ & chất lượng tối đa.", 9.5f, Muted);
+        var autoLoopNote = NewLabel("Chế độ Ổn định: nhẹ máy, tiết kiệm RAM • Chế độ NV (Siêu tốc): huy động 80–90% CPU & RAM + GPU phần cứng • Tự động lưu thư mục xuất.", 9.5f, Muted);
         autoLoopNote.AutoSize = true;
         autoLoopNote.Padding = new Padding(0, 4, 0, 0);
         table.Controls.Add(autoLoopNote, 0, 3);
-        _tooltip.SetToolTip(_encoder, "H.264 Đa luồng CPU (ổn định): tiết kiệm RAM, không lag máy.\nNVIDIA NVENC GPU (siêu tốc): sử dụng 80–90% CPU & bộ đệm RAM lớn + nội suy Lanczos HQ để render cực nhanh với chất lượng cao nhất.");
+        _tooltip.SetToolTip(_encoder, "H.264 Đa luồng CPU (ổn định): tiết kiệm RAM, không lag máy.\nNVIDIA NVENC GPU (siêu tốc): sử dụng 80–90% CPU & bộ đệm RAM lớn + GPU phần cứng để render cực nhanh với chất lượng cao nhất.");
         panel.Controls.Add(table);
         _editableControls.AddRange([_folderPath, browse, _resolution, _encoder]);
         return panel;
@@ -1537,10 +1541,11 @@ public sealed class MainForm : Form
     {
         _render.Click += async (_, _) => await StartRenderAsync();
         _applySpeed.Click += (_, _) => ApplySpeedToSelection();
-        _muteSourceAudio.CheckedChanged += (_, _) => UpdateAudioButton();
+        _muteSourceAudio.CheckedChanged += (_, _) => { UpdateAudioButton(); SaveUserPreferences(); };
         _videos.SelectedIndexChanged += (_, _) => SyncSpeedSelection();
         _cancel.Click += (_, _) => _cts?.Cancel();
         _openFolder.Click += (_, _) => OpenFolder();
+        _folderPath.TextChanged += (_, _) => { UpdateDiskFreeBadge(); SaveUserPreferences(); };
         ConfigureDragDrop(_videos, true);
         ConfigureDragDrop(_mp3s, false);
         ConfigureListShortcuts(_videos, () => RemoveSelected(true), () => MoveItem(_videos, -1), () => MoveItem(_videos, 1));
@@ -1577,10 +1582,12 @@ public sealed class MainForm : Form
             var slot = _overlaySlots.First(x => x.Corner == corner);
             SetOverlayImage(slot, file);
         };
-        _resolution.SelectedIndexChanged += (_, _) => RefreshLayoutPreview();
-        _burnSrt.CheckedChanged += (_, _) => RefreshLayoutPreview();
-        _subFont.SelectedIndexChanged += (_, _) => RefreshLayoutPreview();
-        _subFontSize.ValueChanged += (_, _) => RefreshLayoutPreview();
+        _resolution.SelectedIndexChanged += (_, _) => { RefreshLayoutPreview(); SaveUserPreferences(); };
+        _encoder.SelectedIndexChanged += (_, _) => SaveUserPreferences();
+        _burnSrt.CheckedChanged += (_, _) => { RefreshLayoutPreview(); SaveUserPreferences(); };
+        _exportSrt.CheckedChanged += (_, _) => SaveUserPreferences();
+        _subFont.SelectedIndexChanged += (_, _) => { RefreshLayoutPreview(); SaveUserPreferences(); };
+        _subFontSize.ValueChanged += (_, _) => { RefreshLayoutPreview(); SaveUserPreferences(); };
         _srtMode.SelectedIndexChanged += (_, _) => RefreshLayoutPreview();
         FormClosing += OnFormClosing;
         RefreshLayoutPreview();
@@ -1802,6 +1809,9 @@ public sealed class MainForm : Form
         if (_rendering) return;
         try
         {
+            if (!EnsureSafeOutputDriveInteractive())
+                return;
+            SaveUserPreferences();
             var options = CollectOptions();
             var tools = FfmpegLocator.Find();
             _cts = new CancellationTokenSource();
@@ -1826,6 +1836,7 @@ public sealed class MainForm : Form
             var output = await new RenderEngine(tools).RenderAsync(options, reporter, _cts.Token);
             if (!IsDisposed)
             {
+                UpdateDiskFreeBadge();
                 _status.Text = $"Đã xuất 1 file MP4: {Path.GetFileName(output)}";
                 MessageBox.Show(this, "Đã xuất 1 video duy nhất:\n\n" +
                     output + (File.Exists(Path.ChangeExtension(output, ".srt"))
@@ -1844,6 +1855,7 @@ public sealed class MainForm : Form
         }
         finally
         {
+            UpdateDiskFreeBadge();
             _cts?.Dispose();
             _cts = null;
             SetBusy(false);
@@ -1853,6 +1865,201 @@ public sealed class MainForm : Form
                 Close();
             }
         }
+    }
+
+    private static string PreferencesFilePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "LangKinhHuKhong.Editer",
+        "ui_settings.json");
+
+    private sealed record UserUiPreferences(
+        string? OutputDirectory = null,
+        int ResolutionIndex = 1,
+        int EncoderIndex = 0,
+        bool MuteSourceAudio = true,
+        bool BurnSrt = true,
+        bool ExportSrt = true,
+        string? SubtitleFont = null,
+        int SubtitleFontSize = 28);
+
+    private static string PickBestDefaultOutputFolder()
+    {
+        var myVideosDefault = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+            "LangKinhHuKhong.Output");
+
+        try
+        {
+            var cFree = RenderEngine.GetAvailableFreeBytes(myVideosDefault);
+            if (RenderEngine.FindBestAlternativeDrive(myVideosDefault) is { } alt &&
+                alt.FreeBytes > 30L * 1024 * 1024 * 1024 &&
+                (cFree < 35L * 1024 * 1024 * 1024 || alt.FreeBytes > cFree * 2))
+            {
+                var youtubeDir = Path.Combine(alt.DriveRoot, "Youtube");
+                if (Directory.Exists(youtubeDir))
+                    return Path.Combine(youtubeDir, "LangKinhHuKhong.Output");
+                return Path.Combine(alt.DriveRoot, "LangKinhHuKhong.Output");
+            }
+        }
+        catch { }
+
+        return myVideosDefault;
+    }
+
+    private void LoadUserPreferences()
+    {
+        _suppressPrefSave = true;
+        try
+        {
+            var defaultFolder = PickBestDefaultOutputFolder();
+            var legacyVideosDefault = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                "LangKinhHuKhong.Output");
+
+            if (File.Exists(PreferencesFilePath))
+            {
+                var json = File.ReadAllText(PreferencesFilePath);
+                var prefs = JsonSerializer.Deserialize<UserUiPreferences>(json);
+                if (prefs is not null)
+                {
+                    var folder = string.IsNullOrWhiteSpace(prefs.OutputDirectory) ? defaultFolder : prefs.OutputDirectory.Trim();
+                    // Nếu thư mục cũ là mặc định trên ổ C đang sắp đầy (< 25GB) mà máy có ổ khác rộng hơn thì ưu tiên ổ rộng
+                    if (string.Equals(folder, legacyVideosDefault, StringComparison.OrdinalIgnoreCase) &&
+                        RenderEngine.GetAvailableFreeBytes(folder) is > 0 and < 25L * 1024 * 1024 * 1024)
+                    {
+                        folder = defaultFolder;
+                    }
+                    _folderPath.Text = folder;
+                    if (prefs.ResolutionIndex >= 0 && prefs.ResolutionIndex < _resolution.Items.Count)
+                        _resolution.SelectedIndex = prefs.ResolutionIndex;
+                    if (prefs.EncoderIndex >= 0 && prefs.EncoderIndex < _encoder.Items.Count)
+                        _encoder.SelectedIndex = prefs.EncoderIndex;
+                    _muteSourceAudio.Checked = prefs.MuteSourceAudio;
+                    _burnSrt.Checked = prefs.BurnSrt;
+                    _exportSrt.Checked = prefs.ExportSrt;
+                    if (!string.IsNullOrWhiteSpace(prefs.SubtitleFont))
+                    {
+                        var idx = _subFont.FindStringExact(prefs.SubtitleFont);
+                        if (idx >= 0) _subFont.SelectedIndex = idx;
+                    }
+                    if (prefs.SubtitleFontSize >= _subFontSize.Minimum && prefs.SubtitleFontSize <= _subFontSize.Maximum)
+                        _subFontSize.Value = prefs.SubtitleFontSize;
+                    return;
+                }
+            }
+
+            _folderPath.Text = defaultFolder;
+        }
+        catch
+        {
+            _folderPath.Text = PickBestDefaultOutputFolder();
+        }
+        finally
+        {
+            _suppressPrefSave = false;
+        }
+    }
+
+    private void SaveUserPreferences()
+    {
+        if (_suppressPrefSave) return;
+        try
+        {
+            var dir = Path.GetDirectoryName(PreferencesFilePath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var prefs = new UserUiPreferences(
+                OutputDirectory: _folderPath.Text.Trim(),
+                ResolutionIndex: _resolution.SelectedIndex,
+                EncoderIndex: _encoder.SelectedIndex,
+                MuteSourceAudio: _muteSourceAudio.Checked,
+                BurnSrt: _burnSrt.Checked,
+                ExportSrt: _exportSrt.Checked,
+                SubtitleFont: _subFont.SelectedItem?.ToString(),
+                SubtitleFontSize: (int)_subFontSize.Value);
+            File.WriteAllText(PreferencesFilePath, JsonSerializer.Serialize(prefs, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch { }
+    }
+
+    private void UpdateDiskFreeBadge()
+    {
+        var path = _folderPath.Text.Trim();
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            _diskFreeLabel.Text = "";
+            return;
+        }
+        var freeBytes = RenderEngine.GetAvailableFreeBytes(path);
+        if (freeBytes <= 0)
+        {
+            _diskFreeLabel.Text = "";
+            return;
+        }
+        var root = Path.GetPathRoot(Path.GetFullPath(path)) ?? "";
+        var freeGb = freeBytes / (1024.0 * 1024 * 1024);
+        if (freeBytes < 25L * 1024 * 1024 * 1024)
+        {
+            _diskFreeLabel.Text = $"⚠ Ổ {root} chỉ còn trống {freeGb:F1} GB (coi chừng đầy ổ khi xuất video dài)";
+            _diskFreeLabel.ForeColor = AccentWarning;
+        }
+        else
+        {
+            _diskFreeLabel.Text = $"● Ổ {root} còn trống {freeGb:F1} GB";
+            _diskFreeLabel.ForeColor = AccentSuccess;
+        }
+    }
+
+    private bool EnsureSafeOutputDriveInteractive()
+    {
+        var targetFolder = _folderPath.Text.Trim();
+        if (string.IsNullOrWhiteSpace(targetFolder)) return true;
+
+        var freeBytes = RenderEngine.GetAvailableFreeBytes(targetFolder);
+        if (freeBytes <= 0 || freeBytes >= 25L * 1024 * 1024 * 1024)
+            return true;
+
+        if (RenderEngine.FindBestAlternativeDrive(targetFolder) is not { } alt ||
+            alt.FreeBytes < Math.Max(35L * 1024 * 1024 * 1024, freeBytes * 2))
+            return true;
+
+        // Ưu tiên đặt thư mục Output ngay cạnh thư mục MP3 đầu vào nếu MP3 đó nằm trên ổ đĩa rộng
+        string suggestedFolder;
+        var firstMp3 = _mp3s.Items.Cast<MediaFile>().FirstOrDefault()?.FullPath;
+        var firstMp3Root = !string.IsNullOrEmpty(firstMp3) ? Path.GetPathRoot(firstMp3) : null;
+        if (!string.IsNullOrEmpty(firstMp3) &&
+            string.Equals(firstMp3Root, alt.DriveRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            suggestedFolder = Path.Combine(Path.GetDirectoryName(firstMp3)!, "Output");
+        }
+        else
+        {
+            var youtubeDir = Path.Combine(alt.DriveRoot, "Youtube");
+            suggestedFolder = Directory.Exists(youtubeDir)
+                ? Path.Combine(youtubeDir, "LangKinhHuKhong.Output")
+                : Path.Combine(alt.DriveRoot, "LangKinhHuKhong.Output");
+        }
+
+        var curRoot = Path.GetPathRoot(Path.GetFullPath(targetFolder)) ?? targetFolder;
+        var curGb = freeBytes / (1024.0 * 1024 * 1024);
+        var altGb = alt.FreeBytes / (1024.0 * 1024 * 1024);
+
+        var choice = MessageBox.Show(
+            this,
+            $"Ổ đĩa đích hiện tại ({curRoot}) chỉ còn trống {curGb:F1} GB — rất dễ bị đầy ổ (lỗi FFmpeg -28: No space left on device) khi xuất video dài nhiều tiếng.\n\n" +
+            $"Hệ thống phát hiện ổ {alt.DriveRoot} còn trống {altGb:F1} GB.\n" +
+            $"Bạn có muốn tự động chuyển 'Thư mục xuất' sang:\n{suggestedFolder}\nđể xuất video an toàn không?",
+            "Cảnh báo dung lượng ổ đĩa thấp",
+            MessageBoxButtons.YesNoCancel,
+            MessageBoxIcon.Warning);
+
+        if (choice == DialogResult.Cancel)
+            return false;
+        if (choice == DialogResult.Yes)
+        {
+            _folderPath.Text = suggestedFolder;
+            SaveUserPreferences();
+        }
+        return true;
     }
 
     private void SetBusy(bool busy)
@@ -1898,6 +2105,7 @@ public sealed class MainForm : Form
         }
         else
         {
+            SaveUserPreferences();
             foreach (var slot in _overlaySlots)
                 slot.Thumbnail.Image?.Dispose();
             _layoutPreview.Image?.Dispose();

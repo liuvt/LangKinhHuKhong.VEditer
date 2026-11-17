@@ -98,8 +98,32 @@ public static class ProcessRunner
         cancellationToken.ThrowIfCancellationRequested();
 
         if (process.ExitCode != 0)
+        {
+            var errText = stderr.ToString();
+            if (process.ExitCode == -28 || errText.Contains("No space left on device", StringComparison.OrdinalIgnoreCase))
+            {
+                var driveHint = "";
+                try
+                {
+                    var root = Path.GetPathRoot(effectiveWorkDir);
+                    if (!string.IsNullOrWhiteSpace(root))
+                    {
+                        var di = new DriveInfo(root);
+                        var freeGb = di.AvailableFreeSpace / (1024.0 * 1024 * 1024);
+                        driveHint = $" (Ổ đĩa {root} hiện chỉ còn trống {freeGb:F2} GB)";
+                    }
+                }
+                catch { }
+
+                throw new InvalidOperationException(
+                    $"Ổ đĩa đích đã hết dung lượng trống trong lúc ghi video{driveHint}.\n" +
+                    "Hãy chọn 'Thư mục xuất' sang ổ đĩa còn nhiều dung lượng trống hơn (ví dụ ổ D:\\) hoặc dọn bớt tệp cũ rồi xuất lại.\n\n" +
+                    $"Chi tiết kỹ thuật ({Path.GetFileName(executable)} mã {process.ExitCode}):\n{errText}");
+            }
+
             throw new InvalidOperationException(
-                $"{Path.GetFileName(executable)} trả về mã {process.ExitCode}:\n" + stderr);
+                $"{Path.GetFileName(executable)} trả về mã {process.ExitCode}:\n" + errText);
+        }
 
         return stdout.ToString();
     }
