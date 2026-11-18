@@ -108,7 +108,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "LangKinhHuKhong.Editer v4.2 Pro  |  Multi-Core Video & Subtitle Studio";
+        Text = "LangKinhHuKhong.Editer v4.5 Pro  |  Multi-Core Video & Subtitle Studio";
         MinimumSize = new Size(1080, 740);
         Size = new Size(1540, 980);
         StartPosition = FormStartPosition.CenterScreen;

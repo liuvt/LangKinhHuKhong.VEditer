@@ -1,8 +1,22 @@
-# LangKinhHuKhong.Editer v4.2 Pro — Multi-Core Video & AI Subtitle Studio
+# LangKinhHuKhong.Editer v4.5 Pro — Multi-Core Video & AI Subtitle Studio
 
 **Windows 10/11 x64 · C# .NET 8 · FFmpeg + FFprobe**
 
-Bản **v4.2 Pro** nâng cấp toàn diện **Giao diện Pro Studio Dark Slate**, **Tối ưu tốc độ Đa nhân CPU / GPU & RAM**, và bổ sung **Màn hình độc lập Create .SRT (MP3 / Video ➔ .SRT khớp thời gian thực)**.
+Bản **v4.5 Pro** nâng cấp toàn diện **Chạy ngầm siêu nhẹ dưới System Tray (ẩn khỏi Taskbar)**, **Tối ưu tốc độ Đa nhân CPU / GPU (NVIDIA NVENC · Intel QuickSync QSV · AMD AMF)**, **Bảo vệ chống đầy ổ đĩa & Cân đối Bitrate thông minh cho video dài 10h–35h+**, và **Nhận diện giọng nói AI 1-lượt PCM siêu tốc (MP3 / Video ➔ .SRT)**.
+
+## Điểm mới nổi bật ở bản v4.5 Pro
+- **Chạy ngầm siêu nhẹ dưới khay hệ thống (System Tray / Toolbar góc phải)**:
+  - Tự động ẩn khỏi thanh **Taskbar** ngay khi bắt đầu Xuất Video hoặc Tạo `.SRT` (hoặc bấm nút `⬇ ẨN KHỎI TASKBAR` / nút thu nhỏ `_`).
+  - Tự động giải phóng bề mặt vẽ GDI/DWM và thu gọn vùng nhớ vật lý (`SetProcessWorkingSetSize`), giúp tiến trình giao diện chiếm `0%` CPU/GPU trong suốt thời gian render nhiều giờ.
+  - Rê chuột vào biểu tượng góc phải để xem `%` tiến độ thời gian thực; nhấp chuột trái để mở lại cửa sổ hoặc chuột phải để mở thư mục xuất / hủy tác vụ.
+- **Tăng tốc phần cứng đa nền tảng GPU & Single-Pass trực tiếp**:
+  - Tự động dò và kích hoạt tuần tự: **NVIDIA NVENC HQ** ➔ **Intel QuickSync (`h264_qsv`)** ➔ **AMD Radeon AMF (`h264_amf`)** ➔ **H.264 Đa luồng CPU (`libx264`)**.
+  - Chế độ **Direct Single-Pass** nối trực tiếp danh sách video gốc (hỗ trợ cả video đổi độ phân giải giữa chừng), không sinh hàng chục GB tệp tạm `clips/`.
+- **Chống lỗi đầy ổ đĩa (`FFmpeg -28: No space left on device`)**:
+  - Tự động lưu cấu hình giao diện & ưu tiên ổ đĩa có dung lượng trống lớn nhất, hiển thị dung lượng trống trực tiếp theo thời gian thực.
+  - Kiểm tra dung lượng ngay từ giây đầu tiên và tự động tính trần `-maxrate` phù hợp cho các bộ truyện audio dài **10–35+ giờ**.
+- **Speech-to-Text (`MP3 / Video ➔ .SRT`) thế hệ mới**:
+  - Giải mã `PCM 16kHz` kết hợp quét `silencedetect` chỉ trong **1 lượt FFmpeg duy nhất**, tách phân đoạn tại điểm năng lượng thấp nhất (`micro-pause`) không mất chữ cuối câu, kèm chế độ dự phòng `whisper-cli` offline.
 
 ## Hai màn hình làm việc độc lập
 
