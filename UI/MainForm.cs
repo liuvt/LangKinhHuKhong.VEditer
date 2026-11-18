@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using LangKinhHuKhong.Editer.Core;
 
@@ -74,6 +75,7 @@ public sealed class MainForm : Form
     private readonly Label _diskFreeLabel = NewInlineLabel("", leftMargin: 16);
     private readonly ComboBox _resolution = NewCombo();
     private readonly ComboBox _encoder = NewCombo();
+    private readonly CheckBox _autoHideToTray = new();
     private readonly CheckBox _muteSourceAudio = new();
     private readonly ComboBox _selectedVideoSpeed = NewCombo();
     private readonly StudioButton _applySpeed = NewButton("ÁP DỤNG", true);
@@ -83,13 +85,26 @@ public sealed class MainForm : Form
     private readonly StudioButton _render = NewButton("▶  XUẤT VIDEO MP4", true);
     private readonly StudioButton _cancel = NewButton("HỦY TÁC VỤ", false);
     private readonly StudioButton _openFolder = NewButton("MỞ THƯ MỤC", false);
+    private readonly StudioButton _hideToTrayBtn = NewButton("⬇  ẨN KHỎI TASKBAR", false);
+    private readonly NotifyIcon _trayIcon = new();
+    private readonly ContextMenuStrip _trayMenu = new();
+    private ToolStripMenuItem? _trayStatusItem;
+    private ToolStripMenuItem? _trayCancelItem;
     private readonly List<Control> _editableControls = [];
     private readonly ToolTip _tooltip = new();
     private CancellationTokenSource? _cts;
     private bool _rendering;
     private bool _closeAfterCancel;
+    private bool _forceExitFromTray;
+    private bool _isHiddenInTray;
     private bool _suppressPrefSave;
     private string _previousStage = "";
+    private string _latestStageText = "Sẵn sàng dựng video hoặc tạo phụ đề SRT.";
+    private int _latestProgressValue;
+    private long _lastTrayTooltipTick;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
 
     public MainForm()
     {
@@ -103,6 +118,7 @@ public sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         DoubleBuffered = true;
         LoadWindowIcon();
+        InitializeSystemTray();
         _overlaySlots =
         [
             new OverlaySlot(Corner.TopLeft, "04-1  ẢNH TRÊN TRÁI", _image1Path, _preview1, NewNumber(20, 20, 100), NewNumber(20, 20, 100), NewNumber(1, 0, 100), NewNumber(1, 0, 100)),
@@ -349,9 +365,10 @@ public sealed class MainForm : Form
         };
         _render.Size = new Size(218, 44);
         _cancel.Size = new Size(124, 44);
-        _openFolder.Size = new Size(152, 44);
+        _openFolder.Size = new Size(148, 44);
+        _hideToTrayBtn.Size = new Size(176, 44);
         _cancel.Enabled = false;
-        buttons.Controls.AddRange([_render, _cancel, _openFolder, _ffmpegStatus]);
+        buttons.Controls.AddRange([_render, _cancel, _openFolder, _hideToTrayBtn, _ffmpegStatus]);
         _ffmpegStatus.AutoSize = true;
         _ffmpegStatus.Padding = new Padding(0, 12, 14, 0);
         footer.Controls.Add(buttons, 0, 2);
@@ -696,23 +713,12 @@ public sealed class MainForm : Form
             _cts = new CancellationTokenSource();
             SetBusy(true);
             _progress.Value = 0;
+            _latestProgressValue = 0;
             _previousStage = "";
+            if (_autoHideToTray.Checked)
+                HideToTray(showBalloon: true, "Đang tạo phụ đề .SRT ngầm dưới khay góc phải. Nhấp biểu tượng để mở lại.");
 
-            var reporter = new Progress<RenderProgress>(p =>
-            {
-                if (IsDisposed) return;
-                if (!string.Equals(_previousStage, p.Stage, StringComparison.Ordinal))
-                {
-                    _previousStage = p.Stage;
-                    _status.Text = p.Stage;
-                }
-                if (p.Percent is double percent)
-                {
-                    var nextVal = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
-                    if (_progress.Value != nextVal)
-                        _progress.Value = nextVal;
-                }
-            });
+            var reporter = new Progress<RenderProgress>(HandleProgressUpdate);
 
             var genOptions = new SrtGenerationOptions(
                 input,
@@ -728,6 +734,12 @@ public sealed class MainForm : Form
 
             if (!IsDisposed)
             {
+                if (_isHiddenInTray)
+                {
+                    ShowTrayBalloon("Tạo phụ đề .SRT hoàn tất", $"Đã xuất {result.Cues.Count} câu: {Path.GetFileName(result.SrtFilePath)}", ToolTipIcon.Info);
+                    RestoreFromTray();
+                }
+
                 var rawSrt = await File.ReadAllTextAsync(result.SrtFilePath);
                 _genSrtScriptBox.Text = rawSrt.Replace("\r\n", "\n").Replace('\r', '\n').Replace("\n", Environment.NewLine);
                 _genSrtSaveEditsBtn.Enabled = true;
@@ -739,6 +751,8 @@ public sealed class MainForm : Form
                     : "";
 
                 _status.Text = $"Đã tạo xong SRT ({result.Cues.Count} câu, {TimeSpan.FromSeconds(result.TotalDurationSeconds):mm\\:ss}): {Path.GetFileName(result.SrtFilePath)}";
+                _latestStageText = _status.Text;
+                UpdateTrayStatus(force: true);
                 MessageBox.Show(this,
                     $"Đã xuất thành công 1 file .SRT khớp thời gian thực ({result.Cues.Count} phân đoạn):\n\n" +
                     $"• File SRT:\n{result.SrtFilePath}{mp3Note}\n\n" +
@@ -751,10 +765,19 @@ public sealed class MainForm : Form
         catch (OperationCanceledException)
         {
             _status.Text = "Đã hủy tác vụ tạo phụ đề .SRT.";
+            _latestStageText = _status.Text;
+            UpdateTrayStatus(force: true);
         }
         catch (Exception ex)
         {
+            if (_isHiddenInTray)
+            {
+                ShowTrayBalloon("Lỗi tạo .SRT", ex.Message, ToolTipIcon.Error);
+                RestoreFromTray();
+            }
             _status.Text = "Tạo phụ đề .SRT thất bại.";
+            _latestStageText = _status.Text;
+            UpdateTrayStatus(force: true);
             MessageBox.Show(this, ex.Message, "Lỗi tạo .SRT", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -1520,18 +1543,26 @@ public sealed class MainForm : Form
         _encoder.Items.AddRange(["H.264 Đa luồng CPU (ổn định)", "NVIDIA NVENC GPU (siêu tốc)"]);
         _encoder.SelectedIndex = 0;
         _encoder.Width = 220;
+        _autoHideToTray.Checked = true;
+        _autoHideToTray.AutoSize = true;
+        _autoHideToTray.Text = "Tự ẩn xuống Toolbar (khay góc phải) khi chạy để siêu nhẹ";
+        _autoHideToTray.ForeColor = Foreground;
+        _autoHideToTray.Margin = new Padding(18, 7, 4, 0);
         optionsRow.Controls.Add(NewInlineLabel("Độ phân giải:", leftMargin: 0));
         optionsRow.Controls.Add(_resolution);
         optionsRow.Controls.Add(NewInlineLabel("Bộ mã hóa:"));
         optionsRow.Controls.Add(_encoder);
+        optionsRow.Controls.Add(_autoHideToTray);
         optionsRow.Controls.Add(_diskFreeLabel);
         table.Controls.Add(optionsRow, 0, 2);
 
-        var autoLoopNote = NewLabel("Chế độ Ổn định: nhẹ máy, tiết kiệm RAM • Chế độ NV (Siêu tốc): huy động 80–90% CPU & RAM + GPU phần cứng • Tự động lưu thư mục xuất.", 9.5f, Muted);
+        var autoLoopNote = NewLabel("Khi ẩn khỏi Taskbar xuống khay hệ thống (Toolbar góc phải): tắt vẽ giao diện GDI/DWM, tự động thu gọn RAM • Nhấp biểu tượng để mở lại bất cứ lúc nào.", 9.5f, Muted);
         autoLoopNote.AutoSize = true;
         autoLoopNote.Padding = new Padding(0, 4, 0, 0);
         table.Controls.Add(autoLoopNote, 0, 3);
         _tooltip.SetToolTip(_encoder, "H.264 Đa luồng CPU (ổn định): tiết kiệm RAM, không lag máy.\nNVIDIA NVENC GPU (siêu tốc): sử dụng 80–90% CPU & bộ đệm RAM lớn + GPU phần cứng để render cực nhanh với chất lượng cao nhất.");
+        _tooltip.SetToolTip(_autoHideToTray, "Khi bật: ngay khi bắt đầu Xuất Video hoặc Tạo .SRT, cửa sổ chính sẽ ẩn khỏi thanh Taskbar và thu nhỏ vào khay hệ thống góc phải (System Tray) để giải phóng RAM & GPU.");
+        _tooltip.SetToolTip(_hideToTrayBtn, "Ẩn phần mềm khỏi Taskbar ngay lập tức và chuyển xuống khay góc phải màn hình (nhấp biểu tượng để hiện lại).");
         panel.Controls.Add(table);
         _editableControls.AddRange([_folderPath, browse, _resolution, _encoder]);
         return panel;
@@ -1542,10 +1573,17 @@ public sealed class MainForm : Form
         _render.Click += async (_, _) => await StartRenderAsync();
         _applySpeed.Click += (_, _) => ApplySpeedToSelection();
         _muteSourceAudio.CheckedChanged += (_, _) => { UpdateAudioButton(); SaveUserPreferences(); };
+        _autoHideToTray.CheckedChanged += (_, _) => SaveUserPreferences();
+        _hideToTrayBtn.Click += (_, _) => HideToTray(showBalloon: true);
         _videos.SelectedIndexChanged += (_, _) => SyncSpeedSelection();
         _cancel.Click += (_, _) => _cts?.Cancel();
         _openFolder.Click += (_, _) => OpenFolder();
         _folderPath.TextChanged += (_, _) => { UpdateDiskFreeBadge(); SaveUserPreferences(); };
+        Resize += (_, _) =>
+        {
+            if (WindowState == FormWindowState.Minimized && !_isHiddenInTray)
+                HideToTray(showBalloon: false);
+        };
         ConfigureDragDrop(_videos, true);
         ConfigureDragDrop(_mp3s, false);
         ConfigureListShortcuts(_videos, () => RemoveSelected(true), () => MoveItem(_videos, -1), () => MoveItem(_videos, 1));
@@ -1817,27 +1855,25 @@ public sealed class MainForm : Form
             _cts = new CancellationTokenSource();
             SetBusy(true);
             _progress.Value = 0;
+            _latestProgressValue = 0;
             _previousStage = "";
-            var reporter = new Progress<RenderProgress>(p =>
-            {
-                if (IsDisposed) return;
-                if (!string.Equals(_previousStage, p.Stage, StringComparison.Ordinal))
-                {
-                    _previousStage = p.Stage;
-                    _status.Text = p.Stage;
-                }
-                if (p.Percent is double percent)
-                {
-                    var nextVal = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
-                    if (_progress.Value != nextVal)
-                        _progress.Value = nextVal;
-                }
-            });
+            if (_autoHideToTray.Checked)
+                HideToTray(showBalloon: true, "Đang xuất video chạy ngầm siêu nhẹ dưới khay góc phải. Nhấp biểu tượng để mở lại bất cứ lúc nào.");
+
+            var reporter = new Progress<RenderProgress>(HandleProgressUpdate);
             var output = await new RenderEngine(tools).RenderAsync(options, reporter, _cts.Token);
             if (!IsDisposed)
             {
+                if (_isHiddenInTray)
+                {
+                    ShowTrayBalloon("Hoàn thành xuất video!", $"Đã xuất: {Path.GetFileName(output)}", ToolTipIcon.Info);
+                    RestoreFromTray();
+                }
                 UpdateDiskFreeBadge();
                 _status.Text = $"Đã xuất 1 file MP4: {Path.GetFileName(output)}";
+                _latestStageText = _status.Text;
+                _latestProgressValue = _progress.Maximum;
+                UpdateTrayStatus(force: true);
                 MessageBox.Show(this, "Đã xuất 1 video duy nhất:\n\n" +
                     output + (File.Exists(Path.ChangeExtension(output, ".srt"))
                         ? "\n\nKèm file SRT đồng bộ: " + Path.ChangeExtension(output, ".srt") : ""),
@@ -1846,11 +1882,22 @@ public sealed class MainForm : Form
         }
         catch (OperationCanceledException)
         {
+            if (_isHiddenInTray && !_closeAfterCancel)
+                RestoreFromTray();
             _status.Text = "Đã hủy. Không có MP4 chưa hoàn chỉnh trong thư mục đầu ra.";
+            _latestStageText = _status.Text;
+            UpdateTrayStatus(force: true);
         }
         catch (Exception ex)
         {
+            if (_isHiddenInTray)
+            {
+                ShowTrayBalloon("Không thể xuất video", ex.Message, ToolTipIcon.Error);
+                RestoreFromTray();
+            }
             _status.Text = "Xuất video thất bại. Xem chi tiết thông báo lỗi.";
+            _latestStageText = _status.Text;
+            UpdateTrayStatus(force: true);
             MessageBox.Show(this, ex.Message, "Không thể xuất video", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -1867,6 +1914,169 @@ public sealed class MainForm : Form
         }
     }
 
+    private void InitializeSystemTray()
+    {
+        _trayMenu.BackColor = SurfaceDark;
+        _trayMenu.ForeColor = Foreground;
+        _trayMenu.Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
+
+        var openUiItem = new ToolStripMenuItem("🖥  Mở cửa sổ LangKinhHuKhong.Editer")
+        {
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+            ForeColor = Color.White
+        };
+        openUiItem.Click += (_, _) => RestoreFromTray();
+
+        _trayStatusItem = new ToolStripMenuItem("● Sẵn sàng")
+        {
+            Enabled = false,
+            ForeColor = AccentSuccess
+        };
+
+        var openOutFolderItem = new ToolStripMenuItem("📂  Mở thư mục xuất video");
+        openOutFolderItem.Click += (_, _) => OpenFolder();
+
+        _trayCancelItem = new ToolStripMenuItem("⏹  Hủy tác vụ đang chạy")
+        {
+            Enabled = false
+        };
+        _trayCancelItem.Click += (_, _) => _cts?.Cancel();
+
+        var exitItem = new ToolStripMenuItem("❌  Thoát hoàn toàn");
+        exitItem.Click += (_, _) =>
+        {
+            _forceExitFromTray = true;
+            if (_isHiddenInTray)
+                RestoreFromTray();
+            Close();
+        };
+
+        _trayMenu.Items.Add(openUiItem);
+        _trayMenu.Items.Add(_trayStatusItem);
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add(openOutFolderItem);
+        _trayMenu.Items.Add(_trayCancelItem);
+        _trayMenu.Items.Add(new ToolStripSeparator());
+        _trayMenu.Items.Add(exitItem);
+
+        _trayIcon.Icon = Icon ?? SystemIcons.Application;
+        _trayIcon.Text = "LangKinhHuKhong.Editer Pro • Sẵn sàng";
+        _trayIcon.ContextMenuStrip = _trayMenu;
+        _trayIcon.Visible = true;
+        _trayIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+                RestoreFromTray();
+        };
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+    }
+
+    private void HandleProgressUpdate(RenderProgress p)
+    {
+        if (IsDisposed) return;
+
+        if (!string.Equals(_previousStage, p.Stage, StringComparison.Ordinal))
+        {
+            _previousStage = p.Stage;
+            _latestStageText = p.Stage;
+            if (!_isHiddenInTray)
+                _status.Text = p.Stage;
+        }
+
+        if (p.Percent is double percent)
+        {
+            var nextVal = Math.Clamp((int)Math.Round(percent * 10), 0, _progress.Maximum);
+            _latestProgressValue = nextVal;
+            if (!_isHiddenInTray && _progress.Value != nextVal)
+                _progress.Value = nextVal;
+        }
+
+        // Khi đang ẩn dưới khay hệ thống: không vẽ lại giao diện GDI/DWM, chỉ cập nhật tooltip khay tối đa 2 giây/lần
+        UpdateTrayStatus(force: false);
+    }
+
+    private void UpdateTrayStatus(bool force)
+    {
+        var now = Environment.TickCount64;
+        if (!force && now - _lastTrayTooltipTick < 2000)
+            return;
+        _lastTrayTooltipTick = now;
+
+        var pct = _latestProgressValue / 10.0;
+        var summary = _rendering
+            ? $"Đang chạy {pct:F1}% • {_latestStageText}"
+            : "LangKinhHuKhong.Editer • Sẵn sàng";
+
+        if (_trayStatusItem is not null)
+            _trayStatusItem.Text = _rendering ? $"⚡ Đang xử lý: {pct:F1}%" : "● Trạng thái: Sẵn sàng";
+
+        // Giới hạn NotifyIcon.Text tối đa 62 ký tự để tương thích tuyệt đối mọi phiên bản Windows Shell
+        var safeTooltip = summary.Length > 62 ? summary[..59] + "..." : summary;
+        try { _trayIcon.Text = safeTooltip; } catch { }
+    }
+
+    private void HideToTray(bool showBalloon, string? customMessage = null)
+    {
+        if (IsDisposed || _isHiddenInTray) return;
+        _isHiddenInTray = true;
+        _trayIcon.Visible = true;
+        UpdateTrayStatus(force: true);
+
+        // Ẩn hoàn toàn khỏi thanh Taskbar và giải phóng bề mặt vẽ DWM/GDI
+        ShowInTaskbar = false;
+        Hide();
+        TrimProcessMemory();
+
+        if (showBalloon)
+        {
+            ShowTrayBalloon(
+                "Đã ẩn xuống khay hệ thống (Chạy ngầm nhẹ máy)",
+                customMessage ?? "Phần mềm đã ẩn khỏi Taskbar để tiết kiệm RAM & GPU. Nhấp biểu tượng ở góc phải màn hình để mở lại.",
+                ToolTipIcon.Info);
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        if (IsDisposed) return;
+        _isHiddenInTray = false;
+
+        // Đồng bộ lại tiến độ mới nhất lên thanh trạng thái ngay khi mở lại cửa sổ
+        _status.Text = _latestStageText;
+        if (_progress.Value != _latestProgressValue)
+            _progress.Value = Math.Clamp(_latestProgressValue, _progress.Minimum, _progress.Maximum);
+
+        ShowInTaskbar = true;
+        Show();
+        if (WindowState == FormWindowState.Minimized)
+            WindowState = FormWindowState.Normal;
+        Activate();
+        BringToFront();
+    }
+
+    private void ShowTrayBalloon(string title, string message, ToolTipIcon icon)
+    {
+        try
+        {
+            if (!_trayIcon.Visible) _trayIcon.Visible = true;
+            var cleanMsg = string.IsNullOrWhiteSpace(message) ? "Nhấp vào biểu tượng để xem chi tiết." : message.Trim();
+            if (cleanMsg.Length > 180) cleanMsg = cleanMsg[..177] + "...";
+            _trayIcon.ShowBalloonTip(3500, title, cleanMsg, icon);
+        }
+        catch { }
+    }
+
+    private static void TrimProcessMemory()
+    {
+        try
+        {
+            GC.Collect(1, GCCollectionMode.Optimized, blocking: false);
+            using var proc = System.Diagnostics.Process.GetCurrentProcess();
+            SetProcessWorkingSetSize(proc.Handle, -1, -1);
+        }
+        catch { }
+    }
+
     private static string PreferencesFilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LangKinhHuKhong.Editer",
@@ -1880,7 +2090,8 @@ public sealed class MainForm : Form
         bool BurnSrt = true,
         bool ExportSrt = true,
         string? SubtitleFont = null,
-        int SubtitleFontSize = 28);
+        int SubtitleFontSize = 28,
+        bool AutoHideToTrayOnRun = true);
 
     private static string PickBestDefaultOutputFolder()
     {
@@ -1937,6 +2148,7 @@ public sealed class MainForm : Form
                     _muteSourceAudio.Checked = prefs.MuteSourceAudio;
                     _burnSrt.Checked = prefs.BurnSrt;
                     _exportSrt.Checked = prefs.ExportSrt;
+                    _autoHideToTray.Checked = prefs.AutoHideToTrayOnRun;
                     if (!string.IsNullOrWhiteSpace(prefs.SubtitleFont))
                     {
                         var idx = _subFont.FindStringExact(prefs.SubtitleFont);
@@ -1975,7 +2187,8 @@ public sealed class MainForm : Form
                 BurnSrt: _burnSrt.Checked,
                 ExportSrt: _exportSrt.Checked,
                 SubtitleFont: _subFont.SelectedItem?.ToString(),
-                SubtitleFontSize: (int)_subFontSize.Value);
+                SubtitleFontSize: (int)_subFontSize.Value,
+                AutoHideToTrayOnRun: _autoHideToTray.Checked);
             File.WriteAllText(PreferencesFilePath, JsonSerializer.Serialize(prefs, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { }
@@ -2068,6 +2281,9 @@ public sealed class MainForm : Form
         foreach (var c in _editableControls) c.Enabled = !busy;
         _render.Enabled = !busy;
         _cancel.Enabled = busy;
+        if (_trayCancelItem is not null)
+            _trayCancelItem.Enabled = busy;
+        UpdateTrayStatus(force: true);
     }
 
     private void UpdateCounts()
@@ -2081,6 +2297,7 @@ public sealed class MainForm : Form
     {
         if (!Directory.Exists(_folderPath.Text))
         {
+            if (_isHiddenInTray) RestoreFromTray();
             MessageBox.Show(this, "Chưa có thư mục đầu ra.", "Thông báo",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -2096,7 +2313,32 @@ public sealed class MainForm : Form
         if (_rendering)
         {
             e.Cancel = true;
-            if (MessageBox.Show(this, "Đang xử lý tác vụ. Hủy và thoát?", "Xác nhận",
+            if (!_forceExitFromTray && e.CloseReason == CloseReason.UserClosing)
+            {
+                var choice = MessageBox.Show(
+                    this,
+                    "Tác vụ đang chạy!\n\n" +
+                    "• Chọn [Yes] để ẨN XUỐNG TOOLBAR (khay góc phải) tiếp tục chạy ngầm siêu nhẹ.\n" +
+                    "• Chọn [No] để HỦY tác vụ và thoát hẳn phần mềm.\n" +
+                    "• Chọn [Cancel] để quay lại.",
+                    "Chạy ngầm hay thoát hẳn?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (choice == DialogResult.Yes)
+                {
+                    HideToTray(showBalloon: true);
+                }
+                else if (choice == DialogResult.No)
+                {
+                    _closeAfterCancel = true;
+                    _cts?.Cancel();
+                }
+                return;
+            }
+
+            _forceExitFromTray = false;
+            if (MessageBox.Show(this, "Đang xử lý tác vụ. Hủy và thoát hoàn toàn?", "Xác nhận",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
             {
                 _closeAfterCancel = true;
@@ -2106,6 +2348,9 @@ public sealed class MainForm : Form
         else
         {
             SaveUserPreferences();
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+            _trayMenu.Dispose();
             foreach (var slot in _overlaySlots)
                 slot.Thumbnail.Image?.Dispose();
             _layoutPreview.Image?.Dispose();
